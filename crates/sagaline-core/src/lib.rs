@@ -7,4 +7,5 @@ pub use rusqlite;
 pub mod cmd;
 pub mod db;
 pub mod model;
+pub mod provider;
 pub mod seed;
