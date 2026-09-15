@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/sagaline", "crates/sagaline-core", "crates/sagaline-ui"]
+members = [
+    "crates/sagaline",
+    "crates/sagaline-core",
+    "crates/sagaline-agent",
+    "crates/sagaline-ui",
+]
 resolver = "2"
 
 [workspace.package]
