@@ -1,388 +1,379 @@
-//! Top-level workspace view and shell. Per-section render functions live
-//! in the sibling modules under `src/view/`. The shell owns:
-//!   - `WorkspaceView` struct + `new` + `Render` impl (incl. Cmd+1..6
-//!     keyboard navigation)
-//!   - `render_sidebar` — the navigation rail
-//!   - `render_content` — the two-tier header / scroll-area layout
-//!   - `render_header` — title + section label + continue button
+//! Top-level gpui view for an open story.
 //!
-//! Submodules attach additional `impl WorkspaceView` blocks; methods on
-//! the same struct resolve across files normally.
+//! Two-pane layout:
+//!
+//! - **Left:** a `gpui_base::Tree` widget showing the story hierarchy.
+//! - **Right:** the selected entity's YAML front matter + Markdown body.
 
-pub mod characters;
-pub mod chapters;
-pub mod environments;
-pub mod format;
-pub mod overview;
-pub mod props;
-pub mod references;
-pub mod story_bible;
+use std::path::PathBuf;
 
-use gpui_kit::component::button::*;
-use gpui_kit::component::dialog::DialogButtonProps;
-use gpui_kit::component::input::InputState;
-use gpui_kit::component::sidebar::*;
-use gpui_kit::component::scroll::ScrollableElement;
-use gpui_kit::component::*;
+use gpui_base::{StyledExt, Tree, TreeItem, TreeState, h_flex, v_flex};
 use gpui_kit::*;
-use sagaline_core::cmd::Cmd;
 
-use crate::state::{Section, WorkspaceState};
+use crate::actions::{OpenStory, ReloadStory};
+use crate::state::WorkspaceState;
+use sagaline_core::{EntityId as StoryEntityId, EntityType as StoryEntityType, ParsedEntity};
 
-/// Top-level workspace view, owned by the gpui window.
+/// Top-level view. Holds [`WorkspaceState`] directly; mutations call
+/// `cx.notify()` to trigger a redraw.
 pub struct WorkspaceView {
-    pub state: WorkspaceState,
-    /// Lazily-created text input for the "New story" dialog. We can't
-    /// construct it in `new()` because `InputState::new` requires `&mut Window`
-    /// and `&mut Context<Self>`, neither of which is available there. The
-    /// first `Render::render` call creates it and caches the entity here.
-    new_story_input: Option<gpui::Entity<InputState>>,
+    state: WorkspaceState,
+    tree_state: Option<Entity<TreeState>>,
 }
 
 impl WorkspaceView {
-    pub fn new(state: WorkspaceState) -> Self {
+    pub fn new() -> Self {
         Self {
-            state,
-            new_story_input: None,
+            state: WorkspaceState::new(),
+            tree_state: None,
         }
+    }
+
+    pub fn new_with_tree(cx: &mut App) -> Self {
+        let tree_state = cx.new(|cx| TreeState::new(cx));
+        Self {
+            state: WorkspaceState::new(),
+            tree_state: Some(tree_state),
+        }
+    }
+
+    pub fn state(&self) -> &WorkspaceState {
+        &self.state
+    }
+
+    pub fn state_mut(&mut self) -> &mut WorkspaceState {
+        &mut self.state
+    }
+
+    /// Open a story at the given path and rebuild the tree.
+    pub fn open_story(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.state.open_story(path);
+        self.rebuild_tree(cx);
+        cx.notify();
+    }
+
+    /// Re-walk the currently-open story directory and refresh the tree.
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.state.reload();
+        self.rebuild_tree(cx);
+        cx.notify();
+    }
+
+    fn rebuild_tree(&mut self, cx: &mut Context<Self>) {
+        let Some(tree_state) = self.tree_state.clone() else {
+            return;
+        };
+        let items = build_tree_items(self.state.graph());
+        tree_state.update(cx, |state, cx| {
+            state.set_items(items, cx);
+        });
+    }
+}
+
+impl Default for WorkspaceView {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Render for WorkspaceView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Lazy-init the dialog's input entity on first render — InputState::new
-        // needs `&mut Window` and `&mut Context<Self>`, which we only have
-        // here. The same entity is shared by the dialog's content builder
-        // and read by the OK handler to dispatch `CreateStory`.
-        if self.new_story_input.is_none() {
-            self.new_story_input =
-                Some(cx.new(|cx| InputState::new(window, cx).placeholder(t!("dialog.new_story_placeholder"))));
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let banner = render_banner(&self.state);
+
+        // Sync workspace selection from the tree's selected item. The Tree
+        // widget owns its click handler; we observe the resulting
+        // selection each render.
+        if let Some(tree_state) = &self.tree_state {
+            let tree_sel = tree_state.read(cx).selected_item().cloned();
+            let desired = tree_sel.map(|item| StoryEntityId(item.id.to_string()));
+            if desired != self.state.selected {
+                self.state.select(desired);
+            }
         }
 
-        // Two-column layout: navigation rail + content pane.
-        div()
-            .id("workspace-root")
+        let body = h_flex()
             .size_full()
-            .flex()
-            .flex_row()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _, cx| {
-                let ks = &event.keystroke;
-                if !ks.modifiers.platform
-                    || ks.modifiers.shift
-                    || ks.modifiers.alt
-                    || ks.modifiers.control
-                {
-                    return;
-                }
-                let idx = match ks.key.as_str() {
-                    "1" => 0,
-                    "2" => 1,
-                    "3" => 2,
-                    "4" => 3,
-                    "5" => 4,
-                    "6" => 5,
-                    _ => return,
-                };
-                if let Some(section) = Section::ALL.get(idx) {
-                    view.state.select_section(*section);
-                    cx.notify();
-                }
-            }))
-            .child(self.render_sidebar(window, cx))
-            .child(div().flex_1().size_full().child(self.render_content(cx)))
+            .child(render_left_pane(
+                self.state.graph(),
+                self.tree_state.as_ref(),
+            ))
+            .child(render_preview(&self.state));
+
+        v_flex().size_full().child(banner).child(body)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Sidebar
+// Tree building
 // ---------------------------------------------------------------------------
 
-/// Build the sidebar row used for every section that exposes a count:
-/// `Characters · N`, `Chapters · N`, etc. Centralised because all five
-/// rows have lockstep "label · count + click to select section" shape.
-fn counted_section_item(
-    cx: &mut Context<WorkspaceView>,
-    label: std::borrow::Cow<'static, str>,
-    count: usize,
-    section: Section,
-) -> SidebarMenuItem {
-    SidebarMenuItem::new(format!("{label} · {count}"))
-        .on_click(cx.listener(move |view, _, _, _| view.state.select_section(section)))
-}
+/// Build the `TreeItem` hierarchy from a `StoryGraph`.
+///
+/// Layout (mirrors the on-disk directory layout):
+///
+/// ```text
+/// story
+/// ├─ Bible (folder, expanded) — bibles
+/// ├─ Characters (folder) — characters
+/// ├─ Environments (folder)
+/// ├─ Props (folder)
+/// └─ Chapters (folder)
+///     └─ <chapter-slug> (sub-folder)
+///         └─ Scenes
+///             └─ <scene-slug>
+/// ```
+fn build_tree_items(graph: Option<&sagaline_core::StoryGraph>) -> Vec<TreeItem> {
+    let Some(g) = graph else {
+        return Vec::new();
+    };
 
-impl WorkspaceView {
-    fn render_sidebar(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        // `cx` in scope.
-        let view_entity = cx.entity();
-        let input = self
-            .new_story_input
-            .clone()
-            .expect("new_story_input initialized in render()");
-        let cmd_tx = self.state.cmd_tx.clone();
+    let mut root_items: Vec<TreeItem> = Vec::new();
 
-        // Stories group
-        let stories: Vec<_> = self
-            .state
-            .workspace
-            .story
-            .iter()
-            .map(|s| s.title.clone())
-            .collect();
-        let selected_story_id = self.state.selected_story_id.clone();
-        let active_section = self.state.section;
+    root_items.push(TreeItem::new(
+        g.story.id.0.clone(),
+        format!("Story · {}", g.story.slug),
+    ));
+    let chapters = g.entities_by_type(StoryEntityType::Chapter);
+    let sections: &[(StoryEntityType, &str)] = &[
+        (StoryEntityType::Bible, "Bible"),
+        (StoryEntityType::Character, "Characters"),
+        (StoryEntityType::Environment, "Environments"),
+        (StoryEntityType::Prop, "Props"),
+        (StoryEntityType::Chapter, "Chapters"),
+    ];
 
-        let story_label = if let Some(s) = &self.state.workspace.story {
-            t!("sidebar.with_emoji", title = s.title.clone()).into_owned()
-        } else {
-            t!("sidebar.no_story").into_owned()
-        };
+    for (ty, label) in sections.iter() {
+        if matches!(ty, StoryEntityType::Shot) {
+            continue;
+        }
+        let entries = g.entities_by_type(*ty);
+        if entries.is_empty() {
+            continue;
+        }
 
-        let story_item = SidebarMenuItem::new(story_label)
-            .active(selected_story_id.is_some())
-            .children([
-                SidebarMenuItem::new(t!("sidebar.story_item_overview")).on_click(cx.listener(
-                    |view, _, _, _| view.state.select_section(Section::Overview),
-                )),
-                SidebarMenuItem::new(t!("sidebar.story_item_story_bible")).on_click(cx.listener(
-                    |view, _, _, _| view.state.select_section(Section::StoryBible),
-                )),
-                counted_section_item(
-                    cx,
-                    t!("sidebar.story_item_characters"),
-                    self.state.workspace.characters.len(),
-                    Section::Characters,
-                ),
-                counted_section_item(
-                    cx,
-                    t!("sidebar.story_item_environments"),
-                    self.state.workspace.environments.len(),
-                    Section::Environments,
-                ),
-                counted_section_item(
-                    cx,
-                    t!("sidebar.story_item_props"),
-                    self.state.workspace.props.len(),
-                    Section::Props,
-                ),
-                counted_section_item(
-                    cx,
-                    t!("sidebar.story_item_references"),
-                    self.collect_references().len(),
-                    Section::References,
-                ),
-                counted_section_item(
-                    cx,
-                    t!("sidebar.story_item_chapters"),
-                    self.state.workspace.chapters.len(),
-                    Section::Chapters,
-                ),
-            ])
-            .default_open(true);
-
-        // Highlight the active section. We mark the matching child active.
-        // (SidebarMenuItem.active() controls visual emphasis.)
-        let _ = (stories, active_section); // suppress unused warnings; used in render_content
-
-        let new_story_item = SidebarMenuItem::new(t!("sidebar.new_story")).on_click(
-            move |_event, window, cx| {
-                // Both closures are `Fn` (re-rendered / re-invoked), so any
-                // non-`Copy` capture has to be cloned at every boundary — the
-                // outer on-click handler and the dialog builder are both
-                // expected to be callable many times.
-                let view_entity = view_entity.clone();
-                let input = input.clone();
-                let cmd_tx = cmd_tx.clone();
-                window.open_alert_dialog(cx, move |alert, _window, _cx| {
-                    let view_entity = view_entity.clone();
-                    let input = input.clone();
-                    let cmd_tx = cmd_tx.clone();
-                    alert
-                        .title(t!("dialog.new_story_title"))
-                        .description(t!("dialog.new_story_description"))
-                        .show_cancel(true)
-                        .button_props(
-                            DialogButtonProps::default()
-                                .ok_text(t!("dialog.new_story_create"))
-                                .cancel_text(t!("dialog.new_story_cancel"))
-                                .on_ok(move |_event, _window, cx| {
-                                    // The OK callback only sees `&mut App`, so we
-                                    // hop through `view_entity` to read the title
-                                    // and dispatch the create command on the view.
-                                    let raw = view_entity
-                                        .read_with(cx, |view, _cx| {
-                                            view.new_story_input
-                                                .as_ref()
-                                                .map(|i| i.read_with(cx, |s, _cx| s.value().to_string()))
-                                                .unwrap_or_default()
-                                        });
-                                    let title = raw.trim().to_string();
-                                    if title.is_empty() {
-                                        return false;
-                                    }
-                                    let (reply_tx, reply_rx) =
-                                        futures::channel::oneshot::channel();
-                                    if cmd_tx
-                                        .unbounded_send(Cmd::CreateStory {
-                                            title,
-                                            reply: reply_tx,
-                                        })
-                                        .is_err()
-                                    {
-                                        return true;
-                                    }
-                                    let view_id = view_entity.entity_id();
-                                    // Clone for the inner spawn closure — the
-                                    // outer `on_ok` is `Fn`, so we can't move
-                                    // out of its captures.
-                                    let spawn_view_entity = view_entity.clone();
-                                    let spawn_input = input.clone();
-                                    cx.spawn(async move |cx| {
-                                        if let Ok(Ok(story)) = reply_rx.await {
-                                            let _ = spawn_view_entity.update(cx, |view, cx| {
-                                                let _ = view.state.select_story(story.id);
-                                                cx.notify();
-                                            });
-                                            // Clear the input via the view's window.
-                                            let _ = cx.with_window(view_id, |window, cx| {
-                                                let _ = spawn_input.update(cx, |s, cx| {
-                                                    s.set_value("", window, cx);
-                                                });
-                                            });
-                                        }
-                                    })
-                                    .detach();
-                                    true
-                                }),
-                        )
-                });
-            },
-        );
-
-        Sidebar::new("workspace-nav")
-            .w(px(280.))
-            .child(
-                SidebarGroup::new(t!("sidebar.my_stories")).child(
-                    SidebarMenu::new()
-                        .child(new_story_item)
-                        .child(SidebarMenuItem::new(t!("sidebar.stories")))
-                        .child(story_item),
-                ),
-            )
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Content pane
-// ---------------------------------------------------------------------------
-
-impl WorkspaceView {
-    fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let header = self.render_header(cx);
-        let body: AnyElement = match self.state.section {
-            Section::Overview => self.render_overview(cx).into_any_element(),
-            Section::StoryBible => self.render_story_bible(cx).into_any_element(),
-            Section::Characters => self.render_characters(cx).into_any_element(),
-            Section::Environments => self.render_environments(cx).into_any_element(),
-            Section::Props => self.render_props(cx).into_any_element(),
-            Section::References => self.render_references(cx).into_any_element(),
-            Section::Chapters => self.render_chapters(cx).into_any_element(),
-        };
-
-        // Two-tier layout:
-        //
-        //   ┌────────────────────────────────────────┐
-        //   │ header (natural height, fixed top)     │
-        //   ├────────────────────────────────────────┤
-        //   │ body container:                        │
-        //   │   .flex_1()      ── takes remaining    │
-        //   │   .overflow_hidden ── drops its        │
-        //   │      content-based automatic min-size  │
-        //   │   so the inner scroll area can shrink  │
-        //   │   below the body height                │
-        //   │   ┌────────────────────────────────┐   │
-        //   │   │ scroll area: .size_full()     │   │
-        //   │   │   .overflow_y_scrollbar()     │   │
-        //   │   │   .p_6()                      │   │
-        //   │   │   ┌────────────────────────┐  │   │
-        //   │   │   │  body (long content)   │  │   │
-        //   │   │   └────────────────────────┘  │   │
-        //   │   └────────────────────────────────┘   │
-        //   └────────────────────────────────────────┘
-        //
-        // The split between "container with overflow_hidden" and "scroll
-        // area inside it" mirrors the pattern used by gpui-component's
-        // Dialog / Sheet internals. Without overflow_hidden on the
-        // container, the inner content's intrinsic min-size fights the
-        // scroll and the area refuses to shrink; without flex_1 + size_full
-        // on the scroll area, the scroll viewport collapses to the
-        // content's height and never reports overflow.
-        div()
-            .size_full()
-            .v_flex()
-            .child(header)
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .size_full()
-                            .overflow_y_scrollbar()
-                            .p_6()
-                            .child(body),
-                    ),
-            )
-    }
-
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let title = self
-            .state
-            .workspace
-            .story
-            .as_ref()
-            .map(|s| s.title.clone())
-            .unwrap_or_else(|| t!("header.fallback_title").to_string());
-
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .px_6()
-            .py_3()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                div()
-                    .v_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_semibold()
-                            .child(title),
+        let folder = match ty {
+            StoryEntityType::Chapter => {
+                let mut folder = TreeItem::new(
+                    format!("__folder_{label}"),
+                    label.to_string(),
+                )
+                .expanded(true);
+                for ch in &chapters {
+                    let scenes_under = g.entities_by_type(StoryEntityType::Scene);
+                    let scenes_for_chapter: Vec<_> = scenes_under
+                        .into_iter()
+                        .filter(|s| {
+                            s.path
+                                .starts_with(format!("chapters/{}/", ch.slug).as_str())
+                        })
+                        .collect();
+                    if scenes_for_chapter.is_empty() {
+                        folder = folder.child(TreeItem::new(
+                            ch.id.0.clone(),
+                            format!("  {}", ch.slug),
+                        ));
+                        continue;
+                    }
+                    folder = folder.child(TreeItem::new(
+                        ch.id.0.clone(),
+                        format!("  {}", ch.slug),
+                    ));
+                    let mut scenes_folder = TreeItem::new(
+                        format!("__scenes_{}", ch.slug),
+                        format!("  Scenes in {}", ch.slug),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(self.state.section.label()),
-                    ),
-            )
-            .child(
-                Button::new("new-shot")
-                    .primary()
-                    .label(t!("header.continue_story"))
-                    .on_click(|_, _, _| {
-                        println!("Continue story — model adapters come online later");
-                    }),
-            )
+                    .expanded(true);
+                    for sc in scenes_for_chapter {
+                        scenes_folder = scenes_folder.child(TreeItem::new(
+                            sc.id.0.clone(),
+                            format!("    {}", sc.slug),
+                        ));
+                    }
+                    folder = folder.child(scenes_folder);
+                }
+                folder
+            }
+            _ => {
+                let mut folder = TreeItem::new(
+                    format!("__folder_{label}"),
+                    label.to_string(),
+                )
+                .expanded(true);
+                for e in &entries {
+                    folder = folder.child(TreeItem::new(
+                        e.id.0.clone(),
+                        format!("  {}", e.slug),
+                    ));
+                }
+                folder
+            }
+        };
+
+        root_items.push(folder);
     }
+
+    root_items
+}
+
+// ---------------------------------------------------------------------------
+// Action wiring
+// ---------------------------------------------------------------------------
+
+pub fn register_actions(view: Entity<WorkspaceView>, cx: &mut App) {
+    let view_for_open = view.clone();
+    cx.on_action::<OpenStory>(move |_, cx| {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open story directory".into()),
+        });
+        let view_for_async = view_for_open.downgrade();
+        cx.spawn(async move |cx| {
+            let result = receiver.await;
+            let paths = match result {
+                Ok(Ok(Some(paths))) => paths,
+                _ => return,
+            };
+            if let Some(path) = paths.into_iter().next() {
+                let _ = view_for_async.update(cx, |view, cx| {
+                    view.open_story(path, cx);
+                });
+            }
+        })
+        .detach();
+    });
+
+    cx.on_action::<ReloadStory>(move |_, cx| {
+        let _ = view.update(cx, |view, cx| {
+            view.reload(cx);
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Banner
+// ---------------------------------------------------------------------------
+
+fn render_banner(state: &WorkspaceState) -> gpui_kit::Div {
+    let title = match state.graph() {
+        Some(g) => match g
+            .story
+            .frontmatter
+            .get("title")
+            .and_then(serde_yaml::Value::as_str)
+        {
+            Some(t) => format!("Sagaline — {t}"),
+            None => format!("Sagaline — {}", g.story.id),
+        },
+        None => "Sagaline".to_string(),
+    };
+
+    let mut row = h_flex()
+        .w_full()
+        .px_4()
+        .py_2()
+        .border_b_1()
+        .child(div().text_lg().font_semibold().child(title));
+
+    if let Some(err) = &state.last_error {
+        row = row.child(div().ml_4().text_sm().child(format!("⚠ {err}")));
+    }
+
+    if state.graph().is_none() && state.last_error.is_none() {
+        row = row.child(div().ml_4().text_sm().child("⌘ O to open a story"));
+    }
+
+    row
+}
+
+// ---------------------------------------------------------------------------
+// Left pane: tree
+// ---------------------------------------------------------------------------
+
+fn render_left_pane(
+    graph: Option<&sagaline_core::StoryGraph>,
+    tree_state: Option<&Entity<TreeState>>,
+) -> gpui_kit::Div {
+    let col = v_flex().w_72().h_full().border_r_1().overflow_hidden();
+
+    let (Some(_), Some(tree)) = (graph, tree_state) else {
+        return col.p_2().child(
+            div()
+                .text_sm()
+                .child("No story loaded. ⌘ O to open one."),
+        );
+    };
+
+    col.child(Tree::new(tree).size_full())
+}
+
+// ---------------------------------------------------------------------------
+// Right pane: front matter + body preview
+// ---------------------------------------------------------------------------
+
+fn render_preview(state: &WorkspaceState) -> gpui_kit::Div {
+    let inner: gpui_kit::Div = match (state.graph(), state.selected.as_ref()) {
+        (Some(graph), Some(sel)) => match find_entity(graph, sel) {
+            Some(e) => render_entity_preview(e),
+            None => div().child("Selected entity is no longer in the graph."),
+        },
+        (Some(_), None) => div().child("Select an entity on the left to preview it."),
+        (None, _) => div().child("No story loaded."),
+    };
+
+    v_flex().flex_1().h_full().child(inner)
+}
+
+fn find_entity<'a>(
+    graph: &'a sagaline_core::StoryGraph,
+    id: &StoryEntityId,
+) -> Option<&'a ParsedEntity> {
+    if graph.story.id.as_str() == id.0 {
+        return Some(&graph.story);
+    }
+    graph.entity(id)
+}
+
+fn render_entity_preview(e: &ParsedEntity) -> gpui_kit::Div {
+    let mut col = v_flex().gap_3().size_full();
+
+    col = col.child(
+        div()
+            .text_lg()
+            .font_semibold()
+            .child(format!("{} · {}", e.type_.as_str(), e.slug)),
+    );
+
+    let yaml = serde_yaml::to_string(&e.frontmatter).unwrap_or_default();
+    col = col.child(
+        v_flex()
+            .gap_1()
+            .child(div().text_xs().font_semibold().child("front matter"))
+            .child(
+                div()
+                    .text_sm()
+                    .font_family("monospace")
+                    .p_2()
+                    .rounded_sm()
+                    .child(yaml),
+            ),
+    );
+
+    if !e.body.trim().is_empty() {
+        col = col.child(
+            v_flex()
+                .gap_1()
+                .child(div().text_xs().font_semibold().child("body"))
+                .child(
+                    div()
+                        .text_sm()
+                        .p_2()
+                        .rounded_sm()
+                        .child(e.body.clone()),
+                ),
+        );
+    }
+
+    col
 }

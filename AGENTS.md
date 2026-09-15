@@ -15,10 +15,12 @@ doubt.
 ```text
 client/                              Rust workspace (resolver = "2")
 ├── Cargo.toml                        workspace root + shared deps
-├── crates/
-│   └── sagaline/                     the desktop binary
+│   ├── sagaline-core/                story workspace model + validation
+│   │   ├── Cargo.toml                 name = "sagaline-core"
+│   │   └── src/                       Markdown Source of Truth, in-memory graph
+│   └── sagaline/                     the desktop binary (hello-world placeholder)
 │       ├── Cargo.toml                 name = "sagaline"
-│       └── src/main.rs                gpui-kit hello-world scaffold
+│       └── src/main.rs                placeholder shell
 ├── README.md                          build + quickstart
 └── AGENTS.md                          you are here
 ```
@@ -30,7 +32,9 @@ new crates as siblings, not nested inside `sagaline/`.
 
 - **Language:** Rust 1.80+
 - **UI:** `gpui-kit = "0.6"` — a single facade crate that re-exports
-  GPUI + gpui-base + gpui-component + default assets.
+  GPUI + gpui-base + gpui-component + default assets. (Currently
+  only used by the placeholder shell; UI work resumes when the
+  next phase ships.)
 - **Single dependency for the UI layer.** Don't add `gpui`,
   `gpui-base`, or `gpui-component` directly to your `Cargo.toml` —
   `gpui-kit` re-exports all three at the matching version. Drift
@@ -41,20 +45,20 @@ new crates as siblings, not nested inside `sagaline/`.
 
 ### Workspace layout
 
-- Single member crate `sagaline` for now. Add new crates as
-  siblings under `crates/` and add them to `members = […]` in
-  the workspace `Cargo.toml`. Anticipated split:
-  - `crates/core/` — story / character / shot workspace model,
-    persistence, BYOK key storage.
-  - `crates/providers/` — `trait ModelAdapter` with per-provider
-    implementations.
-  - `crates/sagaline/` keeps the binary thin — `main.rs` boots
-    the app, hands off to `core`, renders with `gpui-component`.
-- Shared dep versions go in `[workspace.dependencies]` (already
-  set up for `gpui-kit`). Member crates take them with
-  `{ workspace = true }`.
+Current member crates: `sagaline-core` and `sagaline`. Add new
+crates as siblings under `crates/` and add them to
+`members = […]` in the workspace `Cargo.toml`.
 
-### Rust rules
+- `crates/sagaline-core/` — pure story workspace model:
+  `StoryRoot` (path validation), `StoryGraph` (single-walk in-memory
+  graph + validation), entity types (`Story` / `Bible` / `Character`
+  / `Environment` / `Prop` / `Chapter` / `Scene` / `Shot`).
+- `crates/sagaline/` keeps the binary thin — `main.rs` boots the
+  app, hands off to `core`, renders with `gpui-component`. Currently
+  a hello-world placeholder.
+- Shared dep versions go in `[workspace.dependencies]`. Member
+crates take them with `{ workspace = true }`.
+
 
 - **No `as any` / `: any`.** Never inline-cast an object type
   for member access — narrow with `in` / `typeof` or `match`
@@ -79,14 +83,64 @@ new crates as siblings, not nested inside `sagaline/`.
   `.text_color()`) live on `Div` via a trait re-exported from
   `gpui-kit`, not as global helper functions.
 
+### Storage model — Markdown Source of Truth
+
+**The filesystem is the database.** A story is a directory of
+Markdown + YAML front-matter files; nothing else.
+
+```text
+<user-chosen>/<story-slug>/
+├── story.md                         # story entry; id/type/slug/title in front matter
+├── bible/<slug>.md                  # one file per bible entry (world / timeline / rules / lore)
+├── characters/<slug>/character.md   # one folder per character
+├── environments/<slug>/environment.md
+├── props/<slug>.md                  # single-file entities
+├── chapters/<NNN-slug>/
+│   ├── chapter.md
+│   └── scenes/<NNN-slug>.md
+└── assets/                          # generated images / videos / audio (gitignored)
+```
+
+- **Story entry is `story.md`** at the root; the loader rejects any
+  directory missing it.
+- **Slugs are path-derived** — `characters/lin-mo/character.md` →
+  slug `lin-mo`. The on-disk slug is the source of truth;
+  front-matter `slug` must match or validation flags a
+  `SlugMismatch`.
+- **Front matter is YAML**, delimited by `---` lines at the head
+  of the file. Body is preserved verbatim (not parsed this turn).
+- **Reference resolution** — a scene's front matter can name
+  characters / environment / props by either `id` or `slug`:
+  ```yaml
+  characters: [lin-mo, su-yan]
+  environment: laboratory
+  props: [energy-core]
+  ```
+  Slug wins on tie. Unresolved strings still emit a `Reference`
+  (with `to` set to the literal string) so `validate()` can flag
+  `BrokenReference`.
+- **Walker skips** `assets/`, `references/`, anything under
+  `characters/<slug>/references/` or `environments/<slug>/references/`,
+  and any hidden (`.`-prefixed) directory.
+
 ### Persistence & secrets
 
-- BYOK keys live in `~/.config/sagaline/`. Read at startup, never
-  write to a global location, never phone home.
-- Project state: SQLite (planned) via `rusqlite`. Database file
-  in the user's project directory, not in app data.
-- Don't bundle telemetry, crash reporting, or auto-update checks
-  into this binary. A user with `cargo build` and no network must
+- **No embedded database in this turn.** `StoryGraph::load` walks
+  the directory once and produces an in-memory graph; there is no
+  SQLite / sled / redb / index layer. The filesystem *is* the
+  index. SQLite may be reintroduced in a later phase for runtime
+  generation-job state (jobs / assets / embeddings) — not for
+  story content. When that lands it lives in
+  `~/.sageline/data/index.db`, not in the story directory.
+- **Story root location** — chosen by the user (or by an
+  application-level "open story" flow in a later phase). The core
+  crate does not assume any default location.
+- **BYOK keys** — machine-bound, encrypted. Future location:
+  `~/.sageline/data/keys.db` (placeholder; the storage crate is
+  not built yet). Read at startup, never write to a global
+  location, never phone home.
+- **No telemetry.** No analytics, no crash reporting, no
+  auto-update pings. A user with `cargo build` and no network must
   be able to use the whole pipeline.
 
 ### Brand strings
@@ -103,26 +157,25 @@ new crates as siblings, not nested inside `sagaline/`.
 ## Verifying changes
 
 ```bash
-cargo check       # fast — typecheck only
-cargo build       # full link — produces target/debug/sagaline
-cargo run         # launches the desktop window (visual verify)
+cargo check -p sagaline-core   # fast — typecheck the core crate only
+cargo test  -p sagaline-core   # 36 in-module tests
+cargo build -p sagaline-core   # full link of the core crate
 ```
 
-A change is done when `cargo build` produces
-`target/debug/sagaline` without errors. The pre-existing
-`block 0.1.6` future-compat warning on transitive deps is not
-yours to chase.
+A `sagaline-core` change is done when `cargo test -p sagaline-core`
+passes (36 tests). Workspace-wide `cargo check` is clean.
 
-For visual changes, `cargo run` and confirm the window opens;
-the current scaffold renders a single window with the brand + a
-"New story" button.
+For visual changes in a later phase, `cargo run` and confirm the
+window opens.
 
 ## Known carry-over
 
-- This is a minimal scaffold. `main.rs` is one `SagalineApp` view
-  with the brand + a placeholder button. No story workspace, no
-  adapter trait, no persistence — that's all in the deferred
-  list below.
+- The desktop binary (`crates/sagaline/src/main.rs`) is a
+  hello-world placeholder. It does not yet render any UI shell
+  beyond `println!`.
+- `crates/sagaline-ui/` and `crates/sagaline-providers/` do not
+  yet exist. Both will be scaffolded fresh in later phases; until
+  then, no UI rendering and no model provider adapters.
 - `Cargo.lock` is gitignored (intentional for a binary; keep it
   that way).
 
@@ -130,15 +183,23 @@ the current scaffold renders a single window with the brand + a
 
 In priority order — do not skip ahead:
 
-1. **`crates/core/`** — story / character / shot workspace model.
-   SQLite persistence via `rusqlite`. BYOK key storage at
-   `~/.config/sagaline/`.
-2. **`crates/providers/`** — `trait ModelAdapter` with
-   per-provider implementations (OpenAI, Google Gemini, Kling,
-   Runway, ComfyUI HTTP, Ollama HTTP).
-3. **App shell** — top-level `App` entity that owns the workspace
-   view; replace the placeholder `SagalineApp` in `main.rs`.
-4. **Hosted project sync** — when `../homeweb/` ships the project-
-   sync endpoint, add an opt-in client. This is the only piece
-   of this project that talks to `homeweb/`, and it must stay
-   opt-in (the open source pipeline must work without it).
+1. **`crates/sagaline-ui/` (scaffold)** — create the crate against
+   the new `sagaline-core` API. File tree, Markdown editor pane,
+   scene reference preview. Re-add `gpui-kit` / `gpui-component`
+   to the workspace at that point.
+2. **App shell (`crates/sagaline/src/main.rs`)** — replace the
+   `println!` placeholder with a real top-level `App` that owns
+   the workspace view and opens the `sagaline-ui` components.
+3. **`crates/sagaline-providers/` (scaffold)** — `trait
+   ModelAdapter` with per-provider implementations (OpenAI, Google
+   Gemini, Kling, Runway, ComfyUI HTTP, Ollama HTTP). When this
+   lands, runtime generation-job state (jobs / assets / embeddings)
+   may go into `~/.sageline/data/index.db` via `rusqlite` — but
+   **story content stays in the Markdown files**.
+4. **BYOK key store** — encrypted storage under
+   `~/.sageline/data/keys.db`, age-encrypted, machine-bound.
+   Provider config reads from here.
+5. **Hosted project sync** — when `../homeweb/` ships the project-
+   sync endpoint, add an opt-in client. This is the only piece of
+   this project that talks to `homeweb/`, and it must stay opt-in
+   (the open source pipeline must work without it).

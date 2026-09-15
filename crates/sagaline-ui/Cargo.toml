@@ -5,14 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Sagaline desktop UI: gpui-kit views for story / character / chapter / scene / shot workspace."
+description = "Sagaline desktop UI: gpui-kit views over the sagaline-core story graph."
 
 [dependencies]
 gpui-kit = { workspace = true }
+gpui-base = { workspace = true }
 gpui-component = { workspace = true }
-rust-i18n = { workspace = true }
 sagaline-core = { path = "../sagaline-core" }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
-chrono = { workspace = true }
-futures = { workspace = true }

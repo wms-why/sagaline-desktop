@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Sagaline — open source AI video generator (Rust client)"
+description = "Sagaline — open source AI video generator (desktop binary)."
 
 [lib]
 name = "sagaline"
@@ -16,8 +16,7 @@ name = "sagaline"
 path = "src/main.rs"
 
 [dependencies]
-gpui-kit = { workspace = true }
-sagaline-ui = { path = "../sagaline-ui" }
 sagaline-core = { path = "../sagaline-core" }
+sagaline-ui = { path = "../sagaline-ui" }
+gpui-kit = { workspace = true }
 anyhow = { workspace = true }
-futures = { workspace = true }

@@ -5,15 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Sagaline domain model + SQLite persistence (story / character / chapter / scene / shot)."
+description = "Sagaline story workspace — Markdown Source of Truth, file-system graph."
 
 [dependencies]
-rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-anyhow = { workspace = true }
+schemars = "0.8"
+serde_yaml = "0.9"
 thiserror = { workspace = true }
-uuid = { workspace = true }
-chrono = { workspace = true }
-base64 = { workspace = true }
-futures = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
