@@ -94,6 +94,24 @@ impl StoryGraph {
                 entity_refs,
             ));
         }
+        // Shot → parent_scene references. Each shot's `parent_scene`
+        // slug resolves to a scene entity id; we emit a `Shot` edge
+        // so the validator can flag dangling parent_scene refs.
+        for shot in entities
+            .iter()
+            .filter(|e| e.type_ == EntityType::Shot)
+        {
+            let Some(parent_slug) = crate::shot::parent_scene_of(&shot.frontmatter) else {
+                continue;
+            };
+            // Resolve slug → entity id (scenes only).
+            if let Some(parent) = entities
+                .iter()
+                .find(|e| e.type_ == EntityType::Scene && e.slug == parent_slug)
+            {
+                refs.push(crate::shot::shot_reference(&parent.id, &shot.id));
+            }
+        }
 
         // Materialize the canonical story entity from the StoryRoot. The
         // walk also visited story.md; pull its body / front matter from
@@ -199,6 +217,72 @@ impl StoryGraph {
                     expected: fm_slug,
                     actual: e.slug.clone(),
                 });
+            }
+        }
+        // 2b. shot-specific: parent_scene resolves; asset paths match
+        //     the slug-derived convention; required per-shot fields.
+        for e in &self.entities {
+            if e.type_ != EntityType::Shot {
+                continue;
+            }
+            let fm = &e.frontmatter;
+
+            if crate::shot::parent_scene_of(fm).is_none() {
+                errs.push(ValidationError::MissingField {
+                    path: e.path.clone(),
+                    field: "parent_scene",
+                });
+            }
+
+            // Asset path convention (only enforced when the field is
+            // present — empty asset maps are fine pre-generation).
+            let assets = crate::shot::assets_of(fm);
+            let chapter = e
+                .path
+                .components()
+                .nth(1)
+                .and_then(|c| c.as_os_str().to_str())
+                .unwrap_or("");
+            let scene = e
+                .path
+                .components()
+                .nth(3)
+                .and_then(|c| c.as_os_str().to_str())
+                .unwrap_or("");
+            let expected_dir = format!(
+                "assets/chapters/{chapter}/scenes/{scene}/shots/{}",
+                e.slug
+            );
+            // Inline each check; the closure form tripped the
+            // borrow checker (mutating errs from inside `|...|`
+            // while errs is borrowed outside).
+            let mut push_bad = |asset: &str, actual: &std::path::Path| {
+                errs.push(ValidationError::InvalidAssetPath {
+                    path: e.path.clone(),
+                    asset: asset.into(),
+                    expected: expected_dir.clone(),
+                    actual: actual.to_string_lossy().into_owned(),
+                });
+            };
+            if let Some(p) = &assets.keyframe {
+                if !p.starts_with(&expected_dir) {
+                    push_bad("keyframe", p);
+                }
+            }
+            if let Some(p) = &assets.video {
+                if !p.starts_with(&expected_dir) {
+                    push_bad("video", p);
+                }
+            }
+            if let Some(p) = &assets.voice {
+                if !p.starts_with(&expected_dir) {
+                    push_bad("voice", p);
+                }
+            }
+            if let Some(p) = &assets.composite {
+                if !p.starts_with(&expected_dir) {
+                    push_bad("composite", p);
+                }
             }
         }
 

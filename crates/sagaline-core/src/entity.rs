@@ -79,12 +79,19 @@ impl From<String> for EntityId {
     }
 }
 
-/// Reference kind — mirrors what a scene can point at.
+/// Reference kind.
+///
+/// - `Character` / `Environment` / `Prop` — a scene points at these
+///   via its front matter.
+/// - `Shot` — a scene contains shots; the edge is parent_scene →
+///   shot. We emit it the same way as the others so the validator
+///   and the UI see a uniform graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReferenceKind {
     Character,
     Environment,
     Prop,
+    Shot,
 }
 
 impl ReferenceKind {
@@ -93,6 +100,7 @@ impl ReferenceKind {
             ReferenceKind::Character => "character",
             ReferenceKind::Environment => "environment",
             ReferenceKind::Prop => "prop",
+            ReferenceKind::Shot => "shot",
         }
     }
 }

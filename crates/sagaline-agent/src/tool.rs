@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use async_trait::async_trait;
 use schemars::{schema::RootSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
@@ -69,16 +70,19 @@ impl ToolDescriptor {
     }
 }
 
-/// A single agent tool. Implementations are stateless and cheap to clone;
-/// the registry holds `Box<dyn Tool>`.
+/// A single agent tool. Implementations are stateless and cheap to
+/// clone; the registry holds `Box<dyn Tool>`. `execute` is async so the
+/// trait can wrap rig `Tool` invocations and HTTP I/O without spawning
+/// a per-call runtime.
+#[async_trait]
 pub trait Tool: Send + Sync {
     /// Static metadata. Must be cheap — called once at registration.
     fn descriptor(&self) -> ToolDescriptor;
 
     /// Execute with JSON arguments. Argument shape is the one advertised
-    /// in [`ToolDescriptor::parameters`]. Return a [`ToolResult`] on
-    /// success; on failure return a [`ToolError`].
-    fn execute(&self, args: Value) -> Result<ToolResult, ToolError>;
+    /// in [`ToolDescriptor::parameters`]. Returns a [`ToolResult`] on
+    /// success; on failure returns a [`ToolError`].
+    async fn execute(&self, args: Value) -> Result<ToolResult, ToolError>;
 }
 
 /// A registry of tools, keyed by name. The agent looks up tools here

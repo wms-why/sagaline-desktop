@@ -36,6 +36,10 @@ pub fn resolve_context(
                 environment.get_or_insert_with(|| r.to.to_string());
             }
             sagaline_core::ReferenceKind::Prop => props.push(r.to.to_string()),
+            // Shot refs (scene → shot) are graph-level edges, not
+            // context for the scene's OBSERVE step. The agent
+            // enumerates shots via parent_scene, not here.
+            sagaline_core::ReferenceKind::Shot => {}
         }
     }
 

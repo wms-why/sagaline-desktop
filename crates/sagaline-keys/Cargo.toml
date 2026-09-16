@@ -1,0 +1,20 @@
+[package]
+name = "sagaline-keys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Sagaline BYOK key store — encrypted API keys under ~/.sageline/data/keys.db."
+
+[dependencies]
+thiserror = { workspace = true }
+redb = { workspace = true }
+age = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

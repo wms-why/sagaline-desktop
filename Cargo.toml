@@ -4,6 +4,8 @@ members = [
     "crates/sagaline-core",
     "crates/sagaline-agent",
     "crates/sagaline-ui",
+    "crates/sagaline-keys",
+    "crates/sagaline-providers",
 ]
 resolver = "2"
 
@@ -24,3 +26,14 @@ serde_yaml = "0.9"
 anyhow = "1"
 thiserror = "1"
 schemars = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+async-trait = "0.1"
+secrecy = "0.10"
+redb = "2"
+age = { version = "0.11", features = ["armor"] }
+toml = "0.8"
+base64 = "0.22"
+tracing = "0.1"
+rig-core = { version = "=0.42.0", default-features = false, features = ["image", "reqwest", "rustls", "derive"] }
+wiremock = "0.6"

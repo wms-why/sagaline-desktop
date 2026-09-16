@@ -67,7 +67,12 @@ impl Agent {
 
     /// Run the agent loop on every scene in the story rooted at
     /// `story_path`. Emits one [`AgentEvent`] per step into `sink`.
-    pub fn run<P: AsRef<Path>>(
+    ///
+    /// Async so tool calls (read_file / write_file / rig image-gen /
+    /// chat completions) can perform I/O without blocking the
+    /// executor. The event sequence emitted is identical to the
+    /// pre-async version; the UI subscribes to the same stream.
+    pub async fn run<P: AsRef<Path>>(
         &self,
         story_path: P,
         sink: &mut dyn EventSink,
@@ -107,8 +112,6 @@ impl Agent {
         }
 
         // For each scene: one full OBSERVE → PLAN → ACT → REFLECT pass.
-        // In this scaffold ACT only invokes the registered tools; a later
-        // phase has the LLM decide which tool to call per shot.
         for (idx, scene) in scenes.iter().enumerate() {
             let step = (idx as u32) + 1;
             if step > self.config.max_steps {
@@ -144,7 +147,7 @@ impl Agent {
             //    registry end-to-end.
             let args = serde_json::json!({ "path": scene.path.to_string_lossy() });
             let result = match self.tools.get("read_file") {
-                Some(tool) => match tool.execute(args.clone()) {
+                Some(tool) => match tool.execute(args.clone()).await {
                     Ok(v) => ToolOutcome::Ok(v),
                     Err(e) => ToolOutcome::Err(e),
                 },
@@ -163,13 +166,13 @@ impl Agent {
                 tool: "read_file".to_string(),
                 args,
                 result_summary: summary.clone(),
-             });
- 
-             // 4. REFLECT — canned self-critique. Real phase replaces
-             //    this with an LLM call.
-             let notes = if matches!(result, ToolOutcome::Ok(_)) {
-                 "scene read back successfully; references resolve".to_string()
-             } else {
+            });
+
+            // 4. REFLECT — canned self-critique. Real phase replaces
+            //    this with an LLM call.
+            let notes = if matches!(result, ToolOutcome::Ok(_)) {
+                "scene read back successfully; references resolve".to_string()
+            } else {
                 format!("tool issue: {summary}")
             };
             let validation_ok = matches!(result, ToolOutcome::Ok(_));

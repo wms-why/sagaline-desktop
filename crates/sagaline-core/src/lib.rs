@@ -15,6 +15,7 @@ pub mod graph;
 pub mod markdown;
 pub mod path;
 pub mod schema;
+pub mod shot;
 pub mod story_root;
 
 pub use entity::{EntityId, EntityType, ParsedEntity, Reference, ReferenceKind};

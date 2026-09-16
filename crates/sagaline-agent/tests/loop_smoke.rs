@@ -52,8 +52,8 @@ impl EventSink for Collect {
     }
 }
 
-#[test]
-fn loop_emits_one_full_pass_per_scene() {
+#[tokio::test]
+async fn loop_emits_one_full_pass_per_scene() {
     let dir = tempdir().unwrap();
     build_story(dir.path());
 
@@ -64,7 +64,7 @@ fn loop_emits_one_full_pass_per_scene() {
     let mut agent = Agent::new();
     agent.tools_mut().register(ReadFileTool::new(dir.path()));
     let mut sink = Collect::default();
-    let outcome = agent.run(dir.path(), &mut sink).expect("run");
+    let outcome = agent.run(dir.path(), &mut sink).await.expect("run");
 
     assert_eq!(outcome, StepOutcome::Complete);
 

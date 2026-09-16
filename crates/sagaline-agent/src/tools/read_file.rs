@@ -6,8 +6,9 @@
 //! `../`) is rejected with [`ToolError::BadArgs`].
 
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, PathBuf};
 
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,6 +44,7 @@ impl ReadFileTool {
     }
 }
 
+#[async_trait]
 impl Tool for ReadFileTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor::for_args::<ReadFileArgs>(
@@ -56,7 +58,7 @@ impl Tool for ReadFileTool {
         )
     }
 
-    fn execute(&self, args: Value) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, args: Value) -> Result<ToolResult, ToolError> {
         let parsed: ReadFileArgs = serde_json::from_value(args).map_err(|e| ToolError::BadArgs {
             name: "read_file".to_string(),
             message: e.to_string(),
@@ -85,6 +87,12 @@ impl Tool for ReadFileTool {
             self.root.join(given)
         };
 
+        // The actual read is sync; we use spawn_blocking because
+        // tool authors shouldn't have to think about that — but
+        // since most reads are tiny and the agent only awaits one
+        // tool at a time, doing it inline is also fine and saves a
+        // context switch. Kept inline for now; revisit if profiling
+        // shows this as hot.
         let content = fs::read_to_string(&abs).map_err(|e| ToolError::Io {
             name: "read_file".to_string(),
             path: abs,
@@ -102,41 +110,32 @@ impl Tool for ReadFileTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use tempfile::tempdir;
 
-    fn write(p: &std::path::Path, body: &str) {
-        fs::write(p, body).unwrap();
+    #[tokio::test]
+    async fn reads_relative_path() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.md"), "hi").unwrap();
+        let tool = ReadFileTool::new(dir.path());
+        let args = serde_json::json!({"path": "hello.md"});
+        let out = tool.execute(args).await.expect("read");
+        assert_eq!(out["content"], "hi");
+        assert_eq!(out["bytes"], 2);
     }
 
-    #[test]
-    fn reads_relative_path_under_root() {
-        let dir = tempfile::tempdir().unwrap();
-        write(&dir.path().join("hello.md"), "hi");
-        let t = ReadFileTool::new(dir.path());
-        let v = t
-            .execute(serde_json::json!({ "path": "hello.md" }))
-            .unwrap();
-        assert_eq!(v["content"], "hi");
-        assert_eq!(v["bytes"], 2);
+    #[tokio::test]
+    async fn rejects_parent_traversal() {
+        let tool = ReadFileTool::new(std::path::PathBuf::from("/tmp"));
+        let args = serde_json::json!({"path": "../etc/passwd"});
+        let err = tool.execute(args).await.unwrap_err();
+        assert!(matches!(err, ToolError::BadArgs { .. }));
     }
 
-    #[test]
-    fn rejects_parent_dir_traversal() {
-        let dir = tempfile::tempdir().unwrap();
-        let t = ReadFileTool::new(dir.path());
-        let err = t
-            .execute(serde_json::json!({ "path": "../etc/passwd" }))
-            .unwrap_err();
-        assert!(matches!(err, ToolError::BadArgs { .. }), "got: {err:?}");
-    }
-
-    #[test]
-    fn rejects_absolute_path_outside_root() {
-        let dir = tempfile::tempdir().unwrap();
-        let t = ReadFileTool::new(dir.path());
-        let err = t
-            .execute(serde_json::json!({ "path": "/etc/passwd" }))
-            .unwrap_err();
-        assert!(matches!(err, ToolError::BadArgs { .. }), "got: {err:?}");
+    #[tokio::test]
+    async fn rejects_absolute_outside_root() {
+        let tool = ReadFileTool::new(std::path::PathBuf::from("/tmp"));
+        let args = serde_json::json!({"path": "/etc/passwd"});
+        let err = tool.execute(args).await.unwrap_err();
+        assert!(matches!(err, ToolError::BadArgs { .. }));
     }
 }

@@ -82,4 +82,15 @@ pub enum ValidationError {
 
     #[error("duplicate id `{id}` across: {paths:?}")]
     DuplicateId { id: String, paths: Vec<PathBuf> },
+
+
+    #[error(
+        "shot `{path}` has asset `{asset}` at `{actual}` which doesn't match the slug-derived directory `{expected}`"
+    )]
+    InvalidAssetPath {
+        path: PathBuf,
+        asset: String,
+        expected: String,
+        actual: String,
+    },
 }

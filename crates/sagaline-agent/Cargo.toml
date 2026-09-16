@@ -9,10 +9,17 @@ description = "Sagaline agent loop — OBSERVE → PLAN → ACT → REFLECT, too
 
 [dependencies]
 sagaline-core = { path = "../sagaline-core" }
-serde = { workspace = true }
+sagaline-providers = { path = "../sagaline-providers" }
+sagaline-keys = { path = "../sagaline-keys" }
+serde = { version = "1", features = ["derive"] }
+async-trait = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 schemars = { workspace = true }
+tokio = { workspace = true }
+secrecy = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+wiremock = { workspace = true }
 tempfile = "3"

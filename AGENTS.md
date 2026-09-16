@@ -292,3 +292,89 @@ then the app shell wires it all together.
    sync endpoint, add an opt-in client. This is the only piece of
    this project that talks to `homeweb/`, and it must stay opt-in
    (the open source pipeline must work without it).
+
+## External dependencies — approval gate
+
+This product ships to end users. Every external dependency we add
+becomes part of the shipped binary's supply chain (linkage, bundled
+artifacts, build prerequisites, license obligations, security CVEs,
+platform coverage). **Any new external dep — Rust crate, system
+binary, native library, font, model weight — MUST be approved by the
+user before it lands in `Cargo.toml`, `[build-dependencies]`,
+`build.rs`, or any compose / shell pipeline.**
+
+What counts as "external":
+
+- Any new entry in `[workspace.dependencies]` or a member crate's
+  `[dependencies]`.
+- Anything `cargo install`-style that the user must fetch to build.
+- Anything invoked at runtime via `Command::new(...)`, shell pipeline,
+  or `PATH` lookup (`ffmpeg`, `git`, `node`, system fonts, …).
+- Bundled native libraries (e.g. `rusqlite` `bundled` feature =
+  ships a SQLite amalgamation; `reqwest` `rustls-tls` = ships a
+  TLS stack).
+
+What does NOT need approval (the project already relies on these):
+
+- Crates already in `[workspace.dependencies]` before this gate.
+- Patches / version bumps of an already-approved crate within the
+  same feature set.
+
+Approval process:
+
+1. **Surface the decision early**, before writing the dep into a
+   manifest. List the alternatives considered and the tradeoff
+   (license, bundle size, platform support, maintenance, native
+   build burden).
+2. **Stop and wait for the user's call.** Do not commit a
+   `Cargo.toml` entry, `build.rs`, or `Command::new` against an
+   unapproved dep. If mid-implementation, revert the partial work.
+3. **Record the decision** in this file (a one-line entry under
+   "Approved external deps" below) once granted, so the next agent
+   doesn't re-ask.
+
+Pre-existing in this repo (carry-over, approved by prior turns):
+none yet under this gate — this section is new.
+
+Approved external deps (populated as the user grants each one):
+
+- `tokio` v1 — async runtime. Approved 2026-09-16 (this turn). Used by
+  provider HTTP clients; brings no native deps of its own.
+- `reqwest` v0.12 with default-features = false, features =
+  `["json", "rustls-tls", "stream"]` — HTTP client. Approved
+  2026-09-16 (this turn). `rustls-tls` avoids the OpenSSL system
+  dependency. `stream` is required for downloading video mp4
+- `redb` v2 — pure-Rust embedded KV store for the key DB.
+  Approved 2026-09-16. Final pick over `sled` (which has entered
+  maintenance mode).
+- `secrecy` v0.10 — wraps API keys so they don't accidentally
+  `Display` / `Debug`. Approved 2026-09-16.
+- `age` v0.11 with features = `["std", "armor"]` — X25519-based
+  encryption of stored keys. Approved 2026-09-16. Provides the
+  recipient/identity abstraction.
+- `redb` v2 — pure-Rust embedded KV store for the key DB.
+  Approved 2026-09-16. Final pick over `sled` (which has entered
+  maintenance mode).
+
+- `mp4` crate v0.x — pure-Rust mp4 muxer for `compose_video`. Approved
+  2026-09-16. Concrete version pinned when the tool lands.
+- Job store: reuses `redb` from the existing `sagaline-keys` key
+  store — the jobs table lives alongside `provider_key` in the
+  same `~/.sageline/data/keys.db` redb file. Approved 2026-09-16.
+  Final pick over a separate SQLite/JSON store.
+- `rig-core` v0.42.0 — opinionated LLM SDK (model providers +
+  tool surface). MIT licensed; compatible with our Apache-2.0.
+  Approved 2026-09-16. We use only the model + tool surface; the
+  classic agent runtime is intentionally NOT adopted (sagaline owns
+  its OBSERVE → PLAN → ACT → REFLECT outer loop). Pin:
+  `rig-core = "=0.42.0"`. Features enabled: default-features off,
+  plus `providers`; within providers, `openai` only (other chat
+  providers added per-feature as users ask for them). We also enable
+  rig's `image_generation` module so OpenAI-compatible image gen
+  (gpt-image-1 etc.) routes through rig. Audio / vector store /
+  rerank / transcription modules are NOT enabled. No telemetry
+  features (monorepo rule).
+- `wiremock` v0.6 — HTTP mock server for integration tests of the
+  OpenAI-compatible chat and MiniMax native image backends.
+  Approved 2026-09-16. Dev-dependency only; never ships.
+

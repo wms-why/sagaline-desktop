@@ -1,0 +1,27 @@
+[package]
+name = "sagaline-providers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Sagaline model provider adapters — ImageGen / Chat / Tts / ImageToVideo traits + per-backend implementations."
+
+[dependencies]
+sagaline-core = { path = "../sagaline-core" }
+sagaline-keys = { path = "../sagaline-keys" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+secrecy = { workspace = true }
+tracing = { workspace = true }
+toml = { workspace = true }
+base64 = "0.22"
+rig-core = { workspace = true }
+
+ [dev-dependencies]
+ tempfile = "3"
+wiremock = { workspace = true }
