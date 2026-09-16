@@ -1,9 +1,16 @@
 //! Top-level gpui view for an open story.
 //!
-//! Two-pane layout:
+//! Two-pane layout with a tabbed right pane:
 //!
 //! - **Left:** a `gpui_base::Tree` widget showing the story hierarchy.
-//! - **Right:** the selected entity's YAML front matter + Markdown body.
+//! - **Right:** tabbed. The default **Preview** tab shows the
+//!   selected entity's YAML front matter + Markdown body. The
+//!   **Activity** tab shows a live scrollback of the agent's
+//!   `AgentEvent` stream (read from the [`AgentEventLog`] global).
+//!
+//! The view emits a [`StoryOpened`] event every time a story
+//! directory is successfully loaded; the app shell subscribes via
+//! `cx.subscribe(&view, ...)` to kick off the agent loop.
 
 use std::path::PathBuf;
 
@@ -11,21 +18,41 @@ use gpui_base::{StyledExt, Tree, TreeItem, TreeState, h_flex, v_flex};
 use gpui_kit::*;
 
 use crate::actions::{OpenStory, ReloadStory};
+use crate::activity::AgentEventLog;
 use crate::state::WorkspaceState;
 use sagaline_core::{EntityId as StoryEntityId, EntityType as StoryEntityType, ParsedEntity};
+
+/// Emitted by [`WorkspaceView`] after a successful `open_story` /
+/// `reload`. The app shell uses this to trigger the agent loop.
+#[derive(Debug, Clone)]
+pub struct StoryOpened {
+    pub path: PathBuf,
+}
+
+/// Which tab is active in the right pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RightTab {
+    #[default]
+    Preview,
+    Activity,
+}
 
 /// Top-level view. Holds [`WorkspaceState`] directly; mutations call
 /// `cx.notify()` to trigger a redraw.
 pub struct WorkspaceView {
     state: WorkspaceState,
     tree_state: Option<Entity<TreeState>>,
+    right_tab: RightTab,
 }
+
+impl EventEmitter<StoryOpened> for WorkspaceView {}
 
 impl WorkspaceView {
     pub fn new() -> Self {
         Self {
             state: WorkspaceState::new(),
             tree_state: None,
+            right_tab: RightTab::default(),
         }
     }
 
@@ -34,6 +61,7 @@ impl WorkspaceView {
         Self {
             state: WorkspaceState::new(),
             tree_state: Some(tree_state),
+            right_tab: RightTab::default(),
         }
     }
 
@@ -45,18 +73,40 @@ impl WorkspaceView {
         &mut self.state
     }
 
-    /// Open a story at the given path and rebuild the tree.
-    pub fn open_story(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.state.open_story(path);
-        self.rebuild_tree(cx);
-        cx.notify();
+    /// Currently-active right-pane tab.
+    pub fn right_tab(&self) -> RightTab {
+        self.right_tab
     }
 
-    /// Re-walk the currently-open story directory and refresh the tree.
-    pub fn reload(&mut self, cx: &mut Context<Self>) {
-        self.state.reload();
+    /// Switch the right pane to a different tab.
+    pub fn set_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
+        if self.right_tab != tab {
+            self.right_tab = tab;
+            cx.notify();
+        }
+    }
+
+    /// Open a story at the given path and rebuild the tree. Emits
+    /// [`StoryOpened`] on success.
+    pub fn open_story(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let was_loaded = self.state.graph().is_some();
+        self.state.open_story(path.clone());
         self.rebuild_tree(cx);
         cx.notify();
+        if self.state.graph().is_some() && !was_loaded {
+            cx.emit(StoryOpened { path });
+        }
+    }
+
+    /// Re-walk the currently-open story directory and refresh the
+    /// graph. No-op if no story is open.
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.state.root_path_owned() {
+            self.state.reload();
+            self.rebuild_tree(cx);
+            cx.notify();
+            cx.emit(StoryOpened { path });
+        }
     }
 
     fn rebuild_tree(&mut self, cx: &mut Context<Self>) {
@@ -80,8 +130,8 @@ impl Render for WorkspaceView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let banner = render_banner(&self.state);
 
-        // Sync workspace selection from the tree's selected item. The Tree
-        // widget owns its click handler; we observe the resulting
+        // Sync workspace selection from the tree's selected item. The
+        // Tree widget owns its click handler; we observe the resulting
         // selection each render.
         if let Some(tree_state) = &self.tree_state {
             let tree_sel = tree_state.read(cx).selected_item().cloned();
@@ -90,6 +140,15 @@ impl Render for WorkspaceView {
                 self.state.select(desired);
             }
         }
+        let activity_log: Option<AgentEventLog> = if cx.has_global::<AgentEventLog>() {
+            Some(cx.global::<AgentEventLog>().clone())
+        } else {
+            None
+        };
+        let activity_count = activity_log
+            .as_ref()
+            .map(|l| l.events.len())
+            .unwrap_or(0);
 
         let body = h_flex()
             .size_full()
@@ -97,7 +156,12 @@ impl Render for WorkspaceView {
                 self.state.graph(),
                 self.tree_state.as_ref(),
             ))
-            .child(render_preview(&self.state));
+            .child(render_right_pane(
+                &self.state,
+                self.right_tab,
+                activity_log.as_ref(),
+                activity_count,
+            ));
 
         v_flex().size_full().child(banner).child(body)
     }
@@ -153,11 +217,8 @@ fn build_tree_items(graph: Option<&sagaline_core::StoryGraph>) -> Vec<TreeItem> 
 
         let folder = match ty {
             StoryEntityType::Chapter => {
-                let mut folder = TreeItem::new(
-                    format!("__folder_{label}"),
-                    label.to_string(),
-                )
-                .expanded(true);
+                let mut folder =
+                    TreeItem::new(format!("__folder_{label}"), label.to_string()).expanded(true);
                 for ch in &chapters {
                     let scenes_under = g.entities_by_type(StoryEntityType::Scene);
                     let scenes_for_chapter: Vec<_> = scenes_under
@@ -194,11 +255,8 @@ fn build_tree_items(graph: Option<&sagaline_core::StoryGraph>) -> Vec<TreeItem> 
                 folder
             }
             _ => {
-                let mut folder = TreeItem::new(
-                    format!("__folder_{label}"),
-                    label.to_string(),
-                )
-                .expanded(true);
+                let mut folder =
+                    TreeItem::new(format!("__folder_{label}"), label.to_string()).expanded(true);
                 for e in &entries {
                     folder = folder.child(TreeItem::new(
                         e.id.0.clone(),
@@ -309,7 +367,68 @@ fn render_left_pane(
 }
 
 // ---------------------------------------------------------------------------
-// Right pane: front matter + body preview
+// Right pane: tab bar + active panel
+// ---------------------------------------------------------------------------
+
+fn render_right_pane(
+    state: &WorkspaceState,
+    tab: RightTab,
+    log: Option<&AgentEventLog>,
+    activity_count: usize,
+) -> gpui_kit::Div {
+    let tabs = render_tab_bar(tab, activity_count);
+    let body: gpui_kit::Div = match tab {
+        RightTab::Preview => render_preview(state),
+        RightTab::Activity => match log {
+            Some(log) => crate::activity::render_activity(log),
+            None => div()
+                .flex_1()
+                .h_full()
+                .p_2()
+                .child("Activity log not installed (binary mode)."),
+        },
+    };
+    v_flex().flex_1().h_full().child(tabs).child(body)
+}
+
+fn render_tab_bar(active: RightTab, activity_count: usize) -> gpui_kit::Div {
+    let preview_weight = if active == RightTab::Preview {
+        FontWeight::BOLD
+    } else {
+        FontWeight::NORMAL
+    };
+    let activity_weight = if active == RightTab::Activity {
+        FontWeight::BOLD
+    } else {
+        FontWeight::NORMAL
+    };
+    let label_activity = if activity_count == 0 {
+        "Activity".to_string()
+    } else {
+        format!("Activity ({activity_count})")
+    };
+    h_flex()
+        .w_full()
+        .px_2()
+        .py_1()
+        .gap_3()
+        .border_b_1()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(preview_weight)
+                .child("Preview"),
+        )
+        .child(
+            div()
+                .text_sm()
+                .font_weight(activity_weight)
+                .child(label_activity),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// Right pane: preview
 // ---------------------------------------------------------------------------
 
 fn render_preview(state: &WorkspaceState) -> gpui_kit::Div {

@@ -1,16 +1,16 @@
-//! Generation job store.
+//! Generation job store. Borrows the [`SagalineStore`]'s redb
+//! handle; both tables live in the same `~/.sageline/data/keys.db`
+//! file under one `redb::Database`.
+//!
+//! See [`SagalineStore`] for the unified entry point.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use redb::{Database, ReadableTable as _, TableDefinition};
+use redb::ReadableTable as _;
 use serde::{Deserialize, Serialize};
 
 use crate::error::KeyError;
-use crate::store::TABLE as KEYS_TABLE;
-
-/// Job table. Key = `job_id` (caller-supplied, e.g. UUID). Value =
-/// JSON-encoded [`Job`] blob.
-const TABLE: TableDefinition<&str, &str> = TableDefinition::new("jobs");
+use crate::store::{JOB_TABLE, SagalineStore};
 
 /// One generation job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,7 +38,7 @@ pub struct Job {
     pub finished_at: Option<String>,
     /// Where the asset will land on disk (relative to the story root).
     #[serde(default)]
-    pub asset_path: Option<PathBuf>,
+    pub asset_path: Option<std::path::PathBuf>,
     /// 1-based attempt count; bumped on retry.
     #[serde(default = "default_attempt")]
     pub attempt: u32,
@@ -80,45 +80,23 @@ impl JobStatus {
     }
 }
 
-/// The job store. Holds an owned redb handle separate from
-/// [`crate::KeyStore`] so callers can use the jobs table without
-/// touching keys.
-pub struct JobStore {
-    db: Database,
-    db_path: PathBuf,
+/// Typed view over the job column of a [`SagalineStore`].
+pub struct JobStore<'a> {
+    pub(crate) store: &'a SagalineStore,
 }
 
-impl JobStore {
-    /// Open or create the jobs store. We **reuse** the same redb
-    /// file as the keys store (`<data_dir>/keys.db`); both tables
-    /// live in it.
-    pub fn open(data_dir: &Path) -> Result<Self, KeyError> {
-        std::fs::create_dir_all(data_dir).map_err(|e| {
-            KeyError::StoreDir(format!("{}: {e}", data_dir.display()))
-        })?;
-        let db_path = data_dir.join("keys.db");
-        let db = Database::create(&db_path)?;
-        // Initialize both tables; subsequent opens reuse them.
-        let txn = db.begin_write().map_err(|e| KeyError::Database(e.into()))?;
-        {
-            txn.open_table(KEYS_TABLE).map_err(|e| KeyError::Database(e.into()))?;
-            txn.open_table(TABLE).map_err(|e| KeyError::Database(e.into()))?;
-        }
-        txn.commit().map_err(|e| KeyError::Database(e.into()))?;
-        Ok(Self { db, db_path })
-    }
-
+impl<'a> JobStore<'a> {
     pub fn db_path(&self) -> &Path {
-        &self.db_path
+        self.store.db_path()
     }
 
     /// Insert or replace a job by id.
     pub fn put(&self, job: &Job) -> Result<(), KeyError> {
         let json = serde_json::to_string(job)
             .map_err(|e| KeyError::Other(format!("job serialize: {e}")))?;
-        let txn = self.db.begin_write().map_err(|e| KeyError::Database(e.into()))?;
+        let txn = self.store.db().begin_write().map_err(|e| KeyError::Database(e.into()))?;
         {
-            let mut table = txn.open_table(TABLE).map_err(|e| KeyError::Database(e.into()))?;
+            let mut table = txn.open_table(JOB_TABLE).map_err(|e| KeyError::Database(e.into()))?;
             table
                 .insert(job.job_id.as_str(), json.as_str())
                 .map_err(|e| KeyError::Database(e.into()))?;
@@ -130,8 +108,8 @@ impl JobStore {
     /// Load a job by id. Returns [`KeyError::NotFound`] if missing.
     pub fn get(&self, job_id: &str) -> Result<Job, KeyError> {
         let json = {
-            let txn = self.db.begin_read().map_err(|e| KeyError::Database(e.into()))?;
-            let table = txn.open_table(TABLE).map_err(|e| KeyError::Database(e.into()))?;
+            let txn = self.store.db().begin_read().map_err(|e| KeyError::Database(e.into()))?;
+            let table = txn.open_table(JOB_TABLE).map_err(|e| KeyError::Database(e.into()))?;
             let guard = table
                 .get(job_id)
                 .map_err(|e| KeyError::Database(e.into()))?
@@ -160,8 +138,8 @@ impl JobStore {
 
     /// List jobs in a given status, oldest first.
     pub fn list_by_status(&self, status: JobStatus) -> Result<Vec<Job>, KeyError> {
-        let txn = self.db.begin_read().map_err(|e| KeyError::Database(e.into()))?;
-        let table = txn.open_table(TABLE).map_err(|e| KeyError::Database(e.into()))?;
+        let txn = self.store.db().begin_read().map_err(|e| KeyError::Database(e.into()))?;
+        let table = txn.open_table(JOB_TABLE).map_err(|e| KeyError::Database(e.into()))?;
         let mut out = Vec::new();
         for entry in table.iter().map_err(|e| KeyError::Database(e.into()))? {
             let (_, v) = entry.map_err(|e| KeyError::Database(e.into()))?;
@@ -186,9 +164,9 @@ impl JobStore {
 
     /// Delete a job by id. Returns `true` if a row was deleted.
     pub fn delete(&self, job_id: &str) -> Result<bool, KeyError> {
-        let txn = self.db.begin_write().map_err(|e| KeyError::Database(e.into()))?;
+        let txn = self.store.db().begin_write().map_err(|e| KeyError::Database(e.into()))?;
         let removed = {
-            let mut table = txn.open_table(TABLE).map_err(|e| KeyError::Database(e.into()))?;
+            let mut table = txn.open_table(JOB_TABLE).map_err(|e| KeyError::Database(e.into()))?;
             let result = table
                 .remove(job_id)
                 .map_err(|e| KeyError::Database(e.into()))?;
@@ -202,11 +180,19 @@ impl JobStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
-    fn store() -> (tempfile::TempDir, JobStore) {
-        let dir = tempfile::tempdir().unwrap();
-        let s = JobStore::open(dir.path()).unwrap();
-        (dir, s)
+    /// `KeyStore<'a>` borrows from `SagalineStore`; the test holds
+    /// the store alive for the test's lifetime and binds both views
+    /// in parallel.
+    fn fresh() -> (tempfile::TempDir, JobStore<'static>) {
+        // Leak the store so we can hand out a 'static view. The
+        // tempdir cleans up the directory when dropped; the leaked
+        // store is reclaimed at process exit.
+        let dir = tempdir().unwrap();
+        let store: &'static SagalineStore =
+            Box::leak(Box::new(SagalineStore::open(dir.path()).unwrap()));
+        (dir, store.jobs())
     }
 
     fn sample(id: &str) -> Job {
@@ -228,7 +214,7 @@ mod tests {
 
     #[test]
     fn put_get_round_trip() {
-        let (_d, s) = store();
+        let (_d, s) = fresh();
         s.put(&sample("job_a")).unwrap();
         let got = s.get("job_a").unwrap();
         assert_eq!(got.provider, "minimax");
@@ -237,7 +223,7 @@ mod tests {
 
     #[test]
     fn update_patches_status() {
-        let (_d, s) = store();
+        let (_d, s) = fresh();
         s.put(&sample("job_b")).unwrap();
         let updated = s
             .update("job_b", |j| {
@@ -251,7 +237,7 @@ mod tests {
 
     #[test]
     fn list_by_status_and_pending() {
-        let (_d, s) = store();
+        let (_d, s) = fresh();
         s.put(&sample("q1")).unwrap();
         s.put(&sample("q2")).unwrap();
         s.update("q2", |j| j.status = JobStatus::Running).unwrap();
@@ -270,14 +256,14 @@ mod tests {
 
     #[test]
     fn get_missing_is_not_found() {
-        let (_d, s) = store();
+        let (_d, s) = fresh();
         let err = s.get("nope").unwrap_err();
         assert!(matches!(err, KeyError::NotFound { .. }));
     }
 
     #[test]
     fn delete_removes() {
-        let (_d, s) = store();
+        let (_d, s) = fresh();
         s.put(&sample("x")).unwrap();
         assert!(s.delete("x").unwrap());
         assert!(matches!(s.get("x").unwrap_err(), KeyError::NotFound { .. }));
@@ -292,14 +278,11 @@ mod tests {
         assert!(JobStatus::Cancelled.is_terminal());
     }
 
-    // Note: a single process holds one redb connection at a time.
-    // Opening both `KeyStore` and `JobStore` against the same file
-    // concurrently fails. The right design is one wrapping store
-    // (`SagalineStore`) that holds a single `Database`. Defer.
     #[test]
     fn jobs_db_path_is_keys_db() {
-        let dir = tempfile::tempdir().unwrap();
-        let jobs = JobStore::open(dir.path()).unwrap();
+        let dir = tempdir().unwrap();
+        let store = SagalineStore::open(dir.path()).unwrap();
+        let jobs = store.jobs();
         assert!(jobs.db_path().ends_with("keys.db"));
     }
 }

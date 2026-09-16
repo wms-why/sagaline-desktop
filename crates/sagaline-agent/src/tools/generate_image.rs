@@ -1,8 +1,8 @@
 //! `generate_image` agent tool.
 //!
 //! Bridges the agent's tool-call layer to the providers' [`ImageGen`]
-//! trait. Holds an `Arc<ProviderRegistry>` + an `Arc<KeyStore>` +
-//! an `Arc<ProviderConfigSet>` so the same triplet can be shared with
+//! trait. Holds an `Arc<ProviderRegistry>` + an `Arc<ProviderConfigSet>`
+//! + an `Arc<SagalineStore>` so the same triplet can be shared with
 //! other tools and the app shell.
 //!
 //! ## Wire shape
@@ -41,7 +41,7 @@ use secrecy::ExposeSecret as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use sagaline_keys::{KeyStore, ProviderKeyId};
+use sagaline_keys::{ProviderKeyId, SagalineStore};
 use sagaline_providers::{
     Capability, GenerationRequest, ProviderConfigSet, ProviderError, ProviderRegistry,
 };
@@ -95,19 +95,19 @@ struct GenerateImageOutput {
 pub struct GenerateImageTool {
     registry: Arc<ProviderRegistry>,
     config: Arc<ProviderConfigSet>,
-    keys: Arc<KeyStore>,
+    store: Arc<SagalineStore>,
 }
 
 impl GenerateImageTool {
     pub fn new(
         registry: Arc<ProviderRegistry>,
         config: Arc<ProviderConfigSet>,
-        keys: Arc<KeyStore>,
+        store: Arc<SagalineStore>,
     ) -> Self {
         Self {
             registry,
             config,
-            keys,
+            store,
         }
     }
 }
@@ -167,7 +167,7 @@ impl GenerateImageTool {
             name: "generate_image".into(),
             source: Box::new(e),
         })?;
-        let key = self.keys.get(&key_id).map_err(|e| ToolError::Execution {
+        let key = self.store.keys().get(&key_id).map_err(|e| ToolError::Execution {
             name: "generate_image".into(),
             source: Box::new(e),
         })?;

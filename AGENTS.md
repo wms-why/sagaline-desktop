@@ -33,12 +33,18 @@ client/                              Rust workspace (resolver = "2")
     ├── sagaline-agent/               OBSERVE → PLAN → ACT → REFLECT loop + tool registry
     │   ├── Cargo.toml                 name = "sagaline-agent"
     │   └── src/                       Tool trait, Agent::run, AgentEvent stream
-    ├── sagaline-ui/                  gpui-kit views (placeholder)
+    ├── sagaline-ui/                  gpui-kit views (workspace + activity panel)
     │   ├── Cargo.toml                 name = "sagaline-ui"
-    │   └── src/                       will subscribe to AgentEvent
-    └── sagaline/                     the desktop binary (hello-world placeholder)
+    │   └── src/                       WorkspaceView, AgentEventLog renderer
+    ├── sagaline-keys/                unified redb store + age-encrypted keys
+    │   ├── Cargo.toml                 name = "sagaline-keys"
+    │   └── src/                       SagalineStore, KeyStore<'_>, JobStore<'_>
+    ├── sagaline-providers/           model adapter traits + provider backends
+    │   ├── Cargo.toml                 name = "sagaline-providers"
+    │   └── src/                       ModelAdapter, ImageGen, openai_compat chat
+    └── sagaline/                     the desktop binary
         ├── Cargo.toml                 name = "sagaline"
-        └── src/main.rs                placeholder shell; will own the App
+        └── src/{main.rs,env.rs,sink.rs}  AppEnv + run_agent + gpui main
 ```
 
 The `crates/` layout is the seam where deferred work goes — add
@@ -48,9 +54,9 @@ new crates as siblings, not nested inside `sagaline/`.
 
 - **Language:** Rust 1.80+
 - **UI:** `gpui-kit = "0.6"` — a single facade crate that re-exports
-  GPUI + gpui-base + gpui-component + default assets. (Currently
-  only used by the placeholder shell; UI work resumes when the
-  next phase ships.)
+  GPUI + gpui-base + gpui-component + default assets. Used by
+  `sagaline-ui` (workspace + activity panel) and `sagaline` (app
+  shell).
 - **Single dependency for the UI layer.** Don't add `gpui`,
   `gpui-base`, or `gpui-component` directly to your `Cargo.toml` —
   `gpui-kit` re-exports all three at the matching version. Drift
@@ -60,11 +66,11 @@ new crates as siblings, not nested inside `sagaline/`.
 ### Workspace layout
 
 Current member crates: `sagaline-core`, `sagaline-agent`,
-`sagaline-ui`, `sagaline`. Add new crates as siblings under
-`crates/` and add them to `members = […]` in the workspace
-`Cargo.toml`.
+`sagaline-ui`, `sagaline-keys`, `sagaline-providers`, `sagaline`.
+Add new crates as siblings under `crates/` and add them to
+`members = […]` in the workspace `Cargo.toml`.
 
-The four crates line up with the agent's anatomy (see
+The six crates line up with the agent's anatomy (see
 `SAGALINE.md`):
 
 - `crates/sagaline-core/` — pure story workspace model. The
@@ -78,15 +84,37 @@ The four crates line up with the agent's anatomy (see
   client can advertise them via function-calling), `AgentEvent`
   stream (the chain-of-thought the UI subscribes to),
   `Agent::run()` driving the OBSERVE → PLAN → ACT → REFLECT
-  loop per scene. Tools in this turn: `ReadFileTool`. Canned
-  PLAN / REFLECT; the LLM swap is a later phase.
-- `crates/sagaline-ui/` — gpui-kit views that subscribe to the
-  agent's event stream and render the workspace. Currently a
-  placeholder; the agent crate is intentionally built first so
-  the UI has a real stream to render.
-- `crates/sagaline/` keeps the binary thin — `main.rs` boots the
-  app, owns the `App`, hands off to `agent` + `ui`. Currently a
-  hello-world placeholder.
+  loop per scene. Tools: `ReadFileTool`, `WriteFileTool`,
+  `ListDirTool`, `FindTool`, `ValidateStoryTool`,
+  `GenerateImageTool`. PLAN / REFLECT are canned (deterministic
+  over the scene's frontmatter); the LLM swap is the next
+  priority.
+- `crates/sagaline-ui/` — gpui-kit views. `WorkspaceView` is a
+  two-pane layout: left pane = story tree, right pane = tabbed
+  (**Preview** for the selected entity's YAML+body, **Activity**
+  for a live scrollback of the agent's event stream).
+  `AgentEventLog` is the gpui global the app shell pushes events
+  into; the activity panel reads it.
+- `crates/sagaline-keys/` — unified [`SagalineStore`]: a single
+  `redb::Database` at `~/.sageline/data/keys.db` holding both the
+  encrypted key table (`provider_key`, age-encrypted with a
+  per-machine X25519 identity) and the job table (`jobs`).
+  `KeyStore` / `JobStore` are typed views that borrow from the
+  store.
+- `crates/sagaline-providers/` — model-adapter traits
+  ([`ModelAdapter`], [`ImageGen`], [`Tts`], [`ImageToVideo`]) and
+  provider backends. Native `minimax` image backend; rig-core
+  OpenAI-compatible chat factory in
+  `openai_compat::build_chat` (covers OpenAI, DeepSeek, Ollama,
+  MiniMax chat, Tongyi). `ProviderConfigSet` parses
+  `~/.sageline/data/config.toml`. `ProviderRegistry` is the
+  capability-keyed dispatch.
+- `crates/sagaline/` keeps the binary thin — `main.rs` boots
+  gpui, installs `AppEnv` (an `Arc<SagalineStore>` +
+  `ProviderConfigSet` + `ProviderRegistry`) as a global, and
+  subscribes to `WorkspaceView::StoryOpened` to spawn the agent
+  loop. The agent's events flow through a `ChannelSink` →
+  `AgentEventLog` global → activity panel.
 - Shared dep versions go in `[workspace.dependencies]`. Member
 crates take them with `{ workspace = true }`.
 
@@ -112,10 +140,10 @@ crates take them with `{ workspace = true }`.
 - **Event sink, not callbacks** (sagaline-agent). Tooling and
   the loop never take a callback closure; they push an
   `AgentEvent` to the caller-supplied `EventSink`. The UI
-  crate will implement `EventSink` to forward events to a
-  gpui channel. Tests use `VecCollector`. Don't reintroduce
-  callback-style hooks "for one-off convenience" — they
-  serialize the UI thread.
+  crate's `AgentEventLog` is the global the app-shell
+  forwarder pushes into; tests use `VecCollector`. Don't
+  reintroduce callback-style hooks "for one-off convenience" —
+  they serialize the UI thread.
 
 - **Pre-allocate at the type system.** `&str` not `String` where
   the lifetime permits, `&[u8]` not `Vec<u8>` for read-only
@@ -178,20 +206,21 @@ directory tree *is* the agent's plan and long-term memory.
 
 ### Persistence & secrets
 
-- **No embedded database in this turn.** `StoryGraph::load` walks
-  the directory once and produces an in-memory graph; there is no
-  SQLite / sled / redb / index layer. The filesystem *is* the
-  index. SQLite may be reintroduced in a later phase for runtime
-  generation-job state (jobs / assets / embeddings) — not for
-  story content. When that lands it lives in
-  `~/.sageline/data/index.db`, not in the story directory.
-- **Story root location** — chosen by the user (or by an
-  application-level "open story" flow in a later phase). The core
-  crate does not assume any default location.
-- **BYOK keys** — machine-bound, encrypted. Future location:
-  `~/.sageline/data/keys.db` (placeholder; the storage crate is
-  not built yet). Read at startup, never write to a global
-  location, never phone home.
+- **No embedded story database.** `StoryGraph::load` walks the
+  directory once and produces an in-memory graph; there is no
+  SQLite / sled / redb / index layer for story content. The
+  filesystem *is* the index.
+- **Runtime state** (jobs, assets) lives in
+  `~/.sageline/data/keys.db` (sagaline-keys) — same `redb` file
+  as the encrypted key table. Story content never touches this
+  store; the agent reads keys only from here.
+- **Story root location** — chosen by the user (via ⌘ O in the
+  desktop app). The core crate does not assume any default
+  location.
+- **BYOK keys** — machine-bound, age-encrypted. Stored at
+  `~/.sageline/data/keys.db` (`provider_key` table). Read at
+  startup via `sagaline_keys::SagalineStore::keys().get(...)`,
+  never written to a global location, never phoned home.
 - **No telemetry.** No analytics, no crash reporting, no
   auto-update pings. A user with `cargo build` and no network must
   be able to use the whole pipeline.
@@ -211,7 +240,7 @@ directory tree *is* the agent's plan and long-term memory.
 
 ```bash
 cargo check --workspace         # typecheck every crate
-cargo test  --workspace         # 36 core + 5 agent (3 unit + 2 integration)
+cargo test  --workspace         # ~83 tests across 6 crates
 cargo build -p sagaline         # the desktop binary
 ```
 
@@ -220,78 +249,81 @@ agent crate's integration test (`tests/loop_smoke.rs`) builds a
 temp story, runs `Agent::run`, and asserts the OBSERVE → PLAN →
 ACT → REFLECT event stream end-to-end. Add to it (or to a
 sibling `tests/foo.rs`) when you add a new tool, a new event
-variant, or any other loop-touching change.
+variant, or any other loop-touching change. The providers crate
+has `tests/{minimax_image,minimax_image_smoke,openai_compat_chat}.rs`
+that exercise the wire shape with `wiremock`.
 
-For visual changes in a later phase, `cargo run` and confirm the
-window opens.
+For visual changes, `cargo run` and confirm the window opens.
 
 ## Known carry-over
 
-- The desktop binary (`crates/sagaline/src/main.rs`) is a
-  hello-world placeholder. It does not yet own a real `App` or
-  open a window.
-- `crates/sagaline-ui/` is a placeholder crate. It will
-  subscribe to `sagaline-agent`'s `AgentEvent` stream and render
-  the right-side chain-of-thought panel + the workspace tree /
-  editor / preview.
-- `crates/sagaline-providers/` does not yet exist. It will
-  house the `ModelAdapter` trait and per-provider
-  implementations; the agent's canned PLAN / REFLECT will be
-  replaced by real LLM calls at the same time.
-- `crates/sagaline-agent/` is scaffolded in this turn: `Tool`
-  trait + `ToolRegistry`, `AgentEvent` stream, `Agent::run` with
-  the OBSERVE → PLAN → ACT → REFLECT skeleton, one concrete
-  tool (`ReadFileTool`). PLAN / REFLECT are canned (deterministic
-  over the scene's frontmatter); the LLM swap is a later phase.
-  See `SAGALINE.md` for the agent framing.
+- `crates/sagaline-agent/` PLAN / REFLECT are still canned
+  (`build_canned_plan` in `loop_.rs` + a fixed "tool issue"
+  REFLECT string). LLM swap is the next priority — the chat
+  factory (`sagaline_providers::openai_compat::build_chat`) is
+  ready and rig-core v0.42.0 is pinned. The LLM-aware loop is a
+  prompt + client swap, not a redesign.
+- `crates/sagaline-providers/` has a native `minimax` image
+  backend but no OpenAI `gpt-image-1` adapter yet; an OpenAI
+  image entry in `config.toml` is silently rejected at
+  `registry.pick_image("openai")`. Adding the adapter is a
+  single-trait impl.
+- `sagaline_agent::tools::generate_image` writes the asset bytes
+  to disk but does not update the shot's `assets.keyframe` /
+  `status: succeeded` frontmatter fields. The follow-up is
+  parsing the existing shot front matter, applying the patch,
+  and writing it back via the existing `WriteFileTool`.
+- The activity tab is the second tab; the user can't click
+  between Preview and Activity yet (the tab bar renders the
+  state but click handling isn't wired). A `SwitchTab` action is
+  the trivial follow-up.
 - `Cargo.lock` is gitignored (intentional for a binary; keep it
   that way).
 
 ## Deferred (next turns)
 
 In priority order — do not skip ahead. The order is driven by
-`SAGALINE.md`: Sagaline is a GUI agent, so the agent loop comes
-first (it can run with mock tools), then the providers feed it
-real actions, then the UI subscribes to the agent's event stream,
-then the app shell wires it all together.
+`SAGALINE.md`: Sagaline is a GUI agent, so the agent loop runs
+first (with mock tools / canned PLAN), the providers feed it
+real actions, the LLM swap replaces the canned responses, and
+only then do the chat-side UX features (editing, batch
+generation, project sync) come back into scope.
 
-1. **`crates/sagaline-agent/` — DONE this turn.** `Tool` trait,
-   `ToolRegistry` (each tool advertises a JSON Schema for its
-   arguments), `AgentEvent` stream, `Agent::run` driving the
-   OBSERVE → PLAN → ACT → REFLECT skeleton, one concrete tool
-   (`ReadFileTool`). PLAN / REFLECT are canned (deterministic
-   over the scene's frontmatter) — the LLM swap is item 3.
-   Verified by `tests/loop_smoke.rs` + the in-crate unit tests.
-2. **`crates/sagaline-providers/` (scaffold)** — `trait
-   ModelAdapter` with per-provider implementations (OpenAI, Google
-   Gemini, Kling, Runway, ComfyUI HTTP, Ollama HTTP). When this
-   lands, swap the agent's mock `generate_image` / `generate_video`
-   tools for real ones. Runtime generation-job state (jobs /
-   assets / embeddings) may go into `~/.sageline/data/index.db`
-   via `rusqlite` — but **story content stays in the Markdown
-   files**.
-3. **Wire LLM into `sagaline-agent`** — replace the agent's
-   canned PLAN / REFLECT responses with real LLM calls (BYOK;
-   first backend: OpenAI-compatible chat completions). The tool
-   registry already speaks JSON Schema, so this is a prompt +
-   client swap, not a redesign.
-4. **`crates/sagaline-ui/` (scaffold)** — create the crate
-   against the new `sagaline-agent` event stream. Right panel
-   subscribes to `AgentEvent::{Observe, Plan, Act, Reflect}` and
-   renders the chain-of-thought live. File tree, Markdown editor
-   pane, scene reference preview. Re-add `gpui-kit` /
-   `gpui-component` to the workspace at that point.
-5. **App shell (`crates/sagaline/src/main.rs`)** — replace the
-   `println!` placeholder with a real top-level `App` that owns
-   the agent + the workspace view and opens the `sagaline-ui`
-   components.
-6. **BYOK key store** — encrypted storage under
-   `~/.sageline/data/keys.db`, age-encrypted, machine-bound.
-   Provider config reads from here.
-7. **Hosted project sync** — when `../homeweb/` ships the project-
-   sync endpoint, add an opt-in client. This is the only piece of
-   this project that talks to `homeweb/`, and it must stay opt-in
-   (the open source pipeline must work without it).
+1. **Wire LLM into `sagaline-agent`** — replace the canned PLAN
+   / REFLECT responses with real LLM calls. First backend:
+   OpenAI-compatible chat completions via
+   `sagaline_providers::openai_compat::build_chat`. The agent
+   crate's `Tool` registry already speaks JSON Schema, so this
+   is a prompt + chat client swap, not a redesign. The
+   `LlmClient` trait + `RigLlm` impl will sit in
+   `sagaline-agent`; the loop becomes PLAN → call LLM with the
+   resolved context + tool schemas → dispatch tool calls →
+   REFLECT with the LLM's critique.
+2. **OpenAI `gpt-image-1` adapter** — the `ProviderRegistry` is
+   already prepared for an image backend under the `openai`
+   name; an `OpenAiImage` impl of [`ImageGen`] closes the gap so
+   `pick_image("openai")` works.
+3. **Generate-image tool → shot frontmatter round-trip** —
+   `generate_image` writes the asset to disk but doesn't update
+   the shot's `assets.keyframe` / `status: succeeded` fields.
+   `sagaline_agent` needs a follow-up step that parses the
+   shot's front matter, applies the patch, and writes it back.
+   The `WriteFileTool` is already in the registry.
+4. **Activity-tab click + SwitchTab action** — bind the tab bar
+   in `sagaline-ui/src/view.rs` to a `SwitchTab` action. Trivial.
+5. **BYOK key-entry UI** — a panel under the activity tab to
+   list `ProviderKeyId`s, add new keys (paste a plaintext once
+   → encrypted via the existing `SagalineStore::keys().put`),
+   delete. Tied to item 1 — once a chat key is present, the
+   "Run agent" button can actually use it.
+6. **Tts + ImageToVideo backends** — `Tts` and `ImageToVideo`
+   traits are defined but no provider has implemented them yet.
+   The registry can route calls as soon as one does.
+7. **Hosted project sync** — when `../homeweb/` ships the
+   project-sync endpoint, add an opt-in client. This is the
+   only piece of this project that talks to `homeweb/`, and it
+   must stay opt-in (the open source pipeline must work without
+   it).
 
 ## External dependencies — approval gate
 
@@ -377,4 +409,3 @@ Approved external deps (populated as the user grants each one):
 - `wiremock` v0.6 — HTTP mock server for integration tests of the
   OpenAI-compatible chat and MiniMax native image backends.
   Approved 2026-09-16. Dev-dependency only; never ships.
-

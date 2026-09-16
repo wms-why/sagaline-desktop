@@ -17,6 +17,12 @@ path = "src/main.rs"
 
 [dependencies]
 sagaline-core = { path = "../sagaline-core" }
+sagaline-agent = { path = "../sagaline-agent" }
+sagaline-keys = { path = "../sagaline-keys" }
+sagaline-providers = { path = "../sagaline-providers" }
 sagaline-ui = { path = "../sagaline-ui" }
 gpui-kit = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

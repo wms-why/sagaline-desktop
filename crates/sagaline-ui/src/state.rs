@@ -73,9 +73,18 @@ impl WorkspaceState {
         self.selected = id;
     }
 
-    /// Borrow the loaded graph, if any.
     pub fn graph(&self) -> Option<&StoryGraph> {
         self.graph.as_ref()
+    }
+
+    /// Borrow the currently-open story path, if any.
+    pub fn root_path(&self) -> Option<&Path> {
+        self.root.as_ref().map(|r| r.path())
+    }
+
+    /// Own the currently-open story path, if any.
+    pub fn root_path_owned(&self) -> Option<PathBuf> {
+        self.root_path().map(|p| p.to_path_buf())
     }
 }
 
