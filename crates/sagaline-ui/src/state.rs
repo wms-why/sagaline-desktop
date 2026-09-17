@@ -1,18 +1,35 @@
 //! UI-side state for an open story.
 //!
-//! [`WorkspaceState`] is a plain data struct — no GPUI dependency. It
-//! wraps a [`sagaline_core::StoryGraph`] loaded from disk and tracks the
+//! [`WorkspaceState`] is a plain data struct — it wraps a
+//! [`sagaline_core::StoryGraph`] loaded from disk and tracks the
 //! user's selection. The view layer owns a `WorkspaceState` and calls
 //! `cx.notify()` after mutating it to trigger a redraw.
+//!
+//! [`KeyStoreSlot`] is the gpui global the binary installs to
+//! expose the encrypted [`sagaline_keys::SagalineStore`] to the
+//! BYOK key-management panel. It lives here (rather than in
+//! `view.rs`) so both the view and the action handlers can reach
+//! it without duplicating the slot type.
 //!
 //! Commands are sync: opening / reloading a story is one disk walk, and
 //! editing a file is a direct write + reload. No background actor is
 //! needed — unlike the previous SQL-era design, there is no shared
 //! database connection to coordinate writes through.
-
 use std::path::{Path, PathBuf};
 
 use sagaline_core::{CoreError, EntityId, StoryGraph, StoryRoot};
+use std::sync::Arc;
+use gpui_kit::Global;
+use sagaline_keys::SagalineStore;
+
+/// gpui global carrying the [`SagalineStore`] the app shell
+/// opened at startup. The view layer reads this from
+/// [`App::global`] to render the BYOK panel; the binary sets it
+/// once during `install_env`. When absent (e.g. in headless tests)
+/// the panel renders a placeholder.
+pub struct KeyStoreSlot(pub Arc<SagalineStore>);
+
+impl Global for KeyStoreSlot {}
 
 /// Top-level UI state. Owns the loaded story graph and the current
 /// selection.

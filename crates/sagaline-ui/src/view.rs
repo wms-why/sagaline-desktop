@@ -16,8 +16,8 @@ use std::path::PathBuf;
 
 use gpui_base::{StyledExt, Tree, TreeItem, TreeState, h_flex, v_flex};
 use gpui_kit::*;
-
-use crate::actions::{OpenStory, ReloadStory};
+use gpui_kit::StatefulInteractiveElement;
+use crate::actions::{DeleteProviderKey, ImportProviderKeyFromFile, OpenStory, ReloadStory, SwitchTab};
 use crate::activity::AgentEventLog;
 use crate::state::WorkspaceState;
 use sagaline_core::{EntityId as StoryEntityId, EntityType as StoryEntityType, ParsedEntity};
@@ -35,6 +35,32 @@ pub enum RightTab {
     #[default]
     Preview,
     Activity,
+    /// BYOK provider key management. Always available — keys are
+    /// scoped to the user's data dir, not the open story.
+    Keys,
+}
+
+impl RightTab {
+    /// Index used by the `SwitchTab` action payload. Stable; the
+    /// tab order is encoded in the tab bar.
+    pub fn index(self) -> u32 {
+        match self {
+            RightTab::Preview => 0,
+            RightTab::Activity => 1,
+            RightTab::Keys => 2,
+        }
+    }
+
+    /// Inverse of [`Self::index`]. Out-of-range values fall back
+    /// to Preview — defensive against malformed action payloads.
+    pub fn from_index(i: u32) -> Self {
+        match i {
+            0 => RightTab::Preview,
+            1 => RightTab::Activity,
+            2 => RightTab::Keys,
+            _ => RightTab::Preview,
+        }
+    }
 }
 
 /// Top-level view. Holds [`WorkspaceState`] directly; mutations call
@@ -161,6 +187,7 @@ impl Render for WorkspaceView {
                 self.right_tab,
                 activity_log.as_ref(),
                 activity_count,
+                cx,
             ));
 
         v_flex().size_full().child(banner).child(body)
@@ -278,6 +305,11 @@ fn build_tree_items(graph: Option<&sagaline_core::StoryGraph>) -> Vec<TreeItem> 
 // ---------------------------------------------------------------------------
 
 pub fn register_actions(view: Entity<WorkspaceView>, cx: &mut App) {
+    // `Entity<T>` is `Clone` but not `Copy`; each `move` closure
+    // below takes its own clone. The original `view` parameter
+    // is held in a separate `let` so all closures see the same
+    // handle without consuming it.
+
     let view_for_open = view.clone();
     cx.on_action::<OpenStory>(move |_, cx| {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
@@ -301,13 +333,97 @@ pub fn register_actions(view: Entity<WorkspaceView>, cx: &mut App) {
         })
         .detach();
     });
-
+    let view_for_reload = view.clone();
     cx.on_action::<ReloadStory>(move |_, cx| {
-        let _ = view.update(cx, |view, cx| {
+        let _ = view_for_reload.update(cx, |view, cx| {
             view.reload(cx);
         });
     });
-}
+    let view_for_tab = view.clone();
+    cx.on_action::<SwitchTab>(move |action, cx| {
+        let target = RightTab::from_index(action.tab);
+        let _ = view_for_tab.update(cx, |view, cx| {
+            view.set_right_tab(target, cx);
+        });
+    });
+    let view_for_delete = view.clone();
+    cx.on_action::<DeleteProviderKey>(move |action, cx| {
+        use crate::state::KeyStoreSlot;
+        let Some(store) = cx.try_global::<KeyStoreSlot>().map(|s| s.0.clone()) else {
+            return;
+        };
+        let provider = action.provider.clone();
+        let key_id = action.key_id.clone();
+        let view_for_refresh = view_for_delete.clone();
+        cx.spawn(async move |cx| {
+            let result = match sagaline_keys::ProviderKeyId::new(provider, key_id) {
+                Ok(id) => store.keys().delete(&id).map(|_| ()),
+                Err(e) => Err(sagaline_keys::KeyError::InvalidId(e.to_string())),
+            };
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "delete provider key failed");
+            }
+            let _ = view_for_refresh.update(cx, |_view, cx| cx.notify());
+        })
+        .detach();
+    });
+    cx.on_action::<ImportProviderKeyFromFile>(move |action, cx| {
+        use crate::state::KeyStoreSlot;
+        let Some(store) = cx.try_global::<KeyStoreSlot>().map(|s| s.0.clone()) else {
+            return;
+        };
+        let provider = action.provider.clone();
+        let key_id = action.key_id.clone();
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Select file containing the API key plaintext".into()),
+        });
+        let view_for_refresh = view.clone();
+        let store_for_task = store.clone();
+        cx.spawn(async move |cx| {
+            let result = receiver.await;
+            let paths = match result {
+                Ok(Ok(Some(paths))) => paths,
+                _ => return,
+            };
+            let Some(path) = paths.into_iter().next() else { return };
+            // Read the file, trim whitespace, store under the
+            // requested (provider, key_id). The file is not
+            // deleted — the caller chose to put the plaintext on
+            // disk; deleting it here would be a surprise.
+            let bytes = match tokio::fs::read(&path).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(error = %e, ?path, "import key: read failed");
+                    return;
+                }
+            };
+            let plaintext = match String::from_utf8(bytes) {
+                Ok(s) => s.trim().to_string(),
+                Err(_) => {
+                    tracing::warn!(?path, "import key: file is not UTF-8");
+                    return;
+                }
+            };
+            let id = match sagaline_keys::ProviderKeyId::new(provider, key_id) {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!(error = %e, "import key: invalid id");
+                    return;
+                }
+            };
+            let secret = secrecy::SecretString::new(plaintext.into_boxed_str());
+            if let Err(e) = store_for_task.keys().put(&id, &secret) {
+                tracing::warn!(error = %e, "import key: store failed");
+                return;
+            }
+            let _ = view_for_refresh.update(cx, |_view, cx| cx.notify());
+        })
+        .detach();
+    });
+ }
 
 // ---------------------------------------------------------------------------
 // Banner
@@ -375,6 +491,7 @@ fn render_right_pane(
     tab: RightTab,
     log: Option<&AgentEventLog>,
     activity_count: usize,
+    cx: &App,
 ) -> gpui_kit::Div {
     let tabs = render_tab_bar(tab, activity_count);
     let body: gpui_kit::Div = match tab {
@@ -387,22 +504,40 @@ fn render_right_pane(
                 .p_2()
                 .child("Activity log not installed (binary mode)."),
         },
+        RightTab::Keys => render_keys_panel(cx),
     };
     v_flex().flex_1().h_full().child(tabs).child(body)
 }
 
+/// Render one tab label. Clicking it dispatches [`SwitchTab`] so
+/// the registered handler in [`register_actions`] updates the
+/// view state. The `SwitchTab` payload uses the tab's stable
+/// [`RightTab::index`].
+fn render_tab_label(label: &str, tab: RightTab, active: RightTab) -> impl IntoElement {
+    let weight = if active == tab {
+        FontWeight::BOLD
+    } else {
+        FontWeight::NORMAL
+    };
+    let target = tab.index();
+    // `.id(...)` returns `Stateful<Div>`, the only `Div`-shaped
+    // type that impls `StatefulInteractiveElement` and therefore
+    // exposes the fluent `.on_click(self, ...)`. `Stateful` is
+    // not part of gpui's public API surface — it lives in
+    // `gpui::elements::div::Stateful` — so we let the compiler
+    // infer the concrete return type.
+    div()
+        .id(format!("tab-{target}"))
+        .text_sm()
+        .font_weight(weight)
+        .on_click(move |_, _, cx| {
+            cx.dispatch_action(&SwitchTab { tab: target });
+        })
+        .child(label.to_string())
+}
+
 fn render_tab_bar(active: RightTab, activity_count: usize) -> gpui_kit::Div {
-    let preview_weight = if active == RightTab::Preview {
-        FontWeight::BOLD
-    } else {
-        FontWeight::NORMAL
-    };
-    let activity_weight = if active == RightTab::Activity {
-        FontWeight::BOLD
-    } else {
-        FontWeight::NORMAL
-    };
-    let label_activity = if activity_count == 0 {
+    let activity_label = if activity_count == 0 {
         "Activity".to_string()
     } else {
         format!("Activity ({activity_count})")
@@ -413,19 +548,86 @@ fn render_tab_bar(active: RightTab, activity_count: usize) -> gpui_kit::Div {
         .py_1()
         .gap_3()
         .border_b_1()
-        .child(
-            div()
-                .text_sm()
-                .font_weight(preview_weight)
-                .child("Preview"),
-        )
-        .child(
-            div()
-                .text_sm()
-                .font_weight(activity_weight)
-                .child(label_activity),
-        )
+        .child(render_tab_label("Preview", RightTab::Preview, active))
+        .child(render_tab_label(&activity_label, RightTab::Activity, active))
+        .child(render_tab_label("Keys", RightTab::Keys, active))
 }
+
+/// Render the BYOK key management panel.
+///
+/// Reads the current key list out of the `AgentEventLog`-adjacent
+/// `SagalineStore` global; the panel is refreshable via reload
+/// (`⌘ R`). Add/delete actions are dispatched through
+/// [`ImportProviderKeyFromFile`] / [`DeleteProviderKey`] and
+/// handled in [`register_actions`].
+fn render_keys_panel(cx: &App) -> gpui_kit::Div {
+    use crate::state::KeyStoreSlot;
+    let mut col = v_flex().gap_2().p_3().size_full();
+
+    col = col.child(
+        div()
+            .text_sm()
+            .font_semibold()
+            .child("Provider API keys"),
+    );
+
+    let store = if cx.has_global::<KeyStoreSlot>() {
+        cx.global::<KeyStoreSlot>().0.clone()
+    } else {
+        return col.child(
+            div()
+                .text_xs()
+                .child("Key store not installed (binary mode)."),
+        );
+    };
+
+    let ids = match store.keys().list_ids() {
+        Ok(ids) => ids,
+        Err(e) => {
+            return col.child(
+                div()
+                    .text_xs()
+                    .child(format!("failed to list keys: {e}")),
+            );
+        }
+    };
+
+    if ids.is_empty() {
+        col = col.child(
+            div()
+                .text_xs()
+                .child("No keys stored yet."),
+        );
+        return col;
+    }
+
+    for id in &ids {
+        let row = h_flex()
+            .w_full()
+            .justify_between()
+            .gap_2()
+            .child(div().text_sm().font_family("monospace").child(id.to_string()))
+            .child(
+                div()
+                    .id(format!("del-{}", id))
+                    .text_xs()
+                    .on_click({
+                        let id = id.clone();
+                        move |_, _, cx| {
+                            cx.dispatch_action(&DeleteProviderKey {
+                                provider: id.provider.clone(),
+                                key_id: id.key_id.clone(),
+                            });
+                        }
+                    })
+                    .child("Delete"),
+            );
+        col = col.child(row);
+    }
+
+    col
+}
+
 
 // ---------------------------------------------------------------------------
 // Right pane: preview

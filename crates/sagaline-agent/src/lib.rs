@@ -11,11 +11,12 @@
 //! `generate_image` / `generate_video` tools for real ones.
 
 pub mod event;
+pub mod llm;
 pub mod loop_;
 pub mod prompt;
 pub mod tool;
 pub mod tools;
-
 pub use event::{AgentEvent, EventSink};
+pub use llm::{LlmClient, LlmError, PlanRequest, ReflectRequest, RigLlm};
 pub use loop_::{Agent, AgentConfig, StepOutcome};
 pub use tool::{Tool, ToolDescriptor, ToolError, ToolRegistry, ToolResult};

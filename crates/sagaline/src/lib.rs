@@ -35,6 +35,13 @@ pub fn install_env(cx: &mut App) -> Result<Arc<AppEnv>, EnvError> {
     let env = Arc::new(AppEnv::open()?);
     cx.set_global::<AppEnvSlot>(AppEnvSlot(env.clone()));
     cx.set_global::<AgentEventLog>(AgentEventLog::default());
+    // The BYOK panel reads the encrypted key store out of this
+    // global. Same `Arc<SagalineStore>` is held by `AppEnv`; the
+    // global is the convenience handle the view layer reaches
+    // without a dependency on this binary crate.
+    cx.set_global::<sagaline_ui::KeyStoreSlot>(sagaline_ui::KeyStoreSlot(
+        env.store.clone(),
+    ));
     info!(data_dir = %env.data_dir.display(), "AppEnv installed");
     Ok(env)
 }

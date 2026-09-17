@@ -94,9 +94,11 @@ impl AppEnv {
     /// `story_root` is the path the user opened; the file tools
     /// confine themselves to that directory.
     ///
-    /// The agent's PLAN / REFLECT are still the canned
-    /// [`sagaline_agent::loop_::build_canned_plan`] implementation —
-    /// LLM swap is a later phase.
+    /// If a chat provider is configured AND a key is registered for
+    /// it, the agent is constructed with a [`sagaline_agent::RigLlm`]
+    /// so PLAN / REFLECT go through the LLM. Without that pair, the
+    /// agent runs in canned mode (the deterministic scaffold used by
+    /// tests and headless runs).
     pub fn build_agent(&self, story_root: &Path) -> Agent {
         use sagaline_agent::tools::{
             FindTool, GenerateImageTool, ListDirTool, ReadFileTool, ValidateStoryTool,
@@ -115,7 +117,46 @@ impl AppEnv {
             self.config.clone(),
             self.store.clone(),
         ));
+        if let Some(llm) = self.try_build_llm() {
+            agent = agent.with_llm(llm);
+        }
         agent
+    }
+
+    /// Build an LLM client if the user has a chat provider
+    /// configured with a registered key. Returns `None` silently
+    /// on any failure (missing config, missing key, build error)
+    /// — the caller falls back to canned mode.
+    fn try_build_llm(&self) -> Option<std::sync::Arc<dyn sagaline_agent::LlmClient>> {
+        use sagaline_agent::{LlmClient, RigLlm};
+        use sagaline_providers::{build_chat_with_default, Capability};
+        use sagaline_keys::ProviderKeyId;
+
+        // First provider that has both `[chat.<provider>]` in
+        // config.toml AND a registered `default` key wins.
+        for provider in self.config.providers(Capability::Chat) {
+            let cfg = match self.config.get(Capability::Chat, &provider) {
+                Some(c) => c,
+                None => continue,
+            };
+            let id = ProviderKeyId::new(&provider, "default").ok()?;
+            let key = self.store.keys().get(&id).ok()?;
+            let model = match build_chat_with_default(
+                &cfg.base_url,
+                None,
+                &cfg.model,
+                &key,
+            ) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(error = %e, provider, "LLM build failed");
+                    continue;
+                }
+            };
+            return Some(std::sync::Arc::new(RigLlm::new(model))
+                as std::sync::Arc<dyn LlmClient>);
+        }
+        None
     }
 }
 
@@ -123,7 +164,6 @@ impl std::fmt::Debug for AppEnv {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppEnv")
             .field("data_dir", &self.data_dir)
-            .field("config_size", &self.config.len())
             .field("registry_providers", &self.registry.providers())
             .finish()
     }

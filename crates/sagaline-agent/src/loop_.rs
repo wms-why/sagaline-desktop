@@ -1,13 +1,13 @@
 //! The agent loop: OBSERVE → PLAN → ACT → REFLECT, per scene.
 //!
-//! In this scaffold PLAN and REFLECT are deterministic functions over
-//! the scene's frontmatter. A later phase replaces them with real LLM
-//! calls; the loop's shape and the [`AgentEvent`]s it emits do not
-//! change.
-
-use std::path::Path;
+//! PLAN and REFLECT dispatch to an optional [`LlmClient`] when one
+//! is attached via [`Agent::with_llm`]; without one, they fall
+//! back to the deterministic canned builders (used by tests and
+//! by headless / no-key runs). The loop's shape and the
+//! [`AgentEvent`]s it emits do not change between the two modes.
 
 use sagaline_core::{CoreError, EntityType, ParsedEntity, StoryGraph, StoryRoot};
+use std::path::Path;
 
 use crate::event::{AgentEvent, EventSink};
 use crate::prompt::resolve_context;
@@ -43,11 +43,11 @@ pub enum StepOutcome {
 pub struct Agent {
     config: AgentConfig,
     tools: ToolRegistry,
+    llm: Option<std::sync::Arc<dyn crate::llm::LlmClient>>,
 }
 
 impl Agent {
     /// Create an agent with default config and an empty tool registry.
-    /// Register tools before calling [`Agent::run`].
     pub fn new() -> Self {
         Self::with_config(AgentConfig::default())
     }
@@ -56,7 +56,18 @@ impl Agent {
         Self {
             config,
             tools: ToolRegistry::new(),
+            llm: None,
         }
+    }
+
+    /// Attach an LLM client. With an LLM attached, the loop
+    /// dispatches PLAN and REFLECT through it instead of the
+    /// canned text builders. Without one, the loop falls back
+    /// to the deterministic scaffold so existing tests /
+    /// headless runs stay unchanged.
+    pub fn with_llm(mut self, llm: std::sync::Arc<dyn crate::llm::LlmClient>) -> Self {
+        self.llm = Some(llm);
+        self
     }
 
     /// Borrow the tool registry so callers can `register(...)` tools
@@ -121,26 +132,45 @@ impl Agent {
                 });
                 return Ok(StepOutcome::MaxStepsReached);
             }
-
+            // Step counter — first event of every step so the UI
+            // can render a "step N" header before the details.
             sink.emit(AgentEvent::StepStart { step });
-
             // 1. OBSERVE
             let resolved = resolve_context(scene, &graph.entities);
             sink.emit(AgentEvent::Observe {
                 step,
                 scene_id: scene.id.to_string(),
-                resolved,
+                resolved: resolved.clone(),
             });
 
-            // 2. PLAN (canned: one shot per referenced character + one
-            //    environment establishing shot, capped at 3)
-            let plan_text = build_canned_plan(scene, &graph);
+            // 2. PLAN — LLM-backed if an LLM is attached, else
+            //    canned. Either way the produced text is a
+            //    Markdown bullet list; the agent counts `- ` lines
+            //    to populate `shots_planned`.
+            let plan_text = match self.llm.as_ref() {
+                Some(llm) => match llm
+                    .complete_plan(&crate::llm::PlanRequest {
+                        scene_body: crate::llm::scene_body(scene),
+                        resolved: resolved.clone(),
+                        tools: crate::llm::tool_summaries(&self.tools),
+                    })
+                    .await
+                {
+                    Ok(text) => text,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "LLM plan failed; falling back to canned");
+                        build_canned_plan(scene, &graph)
+                    }
+                },
+                None => build_canned_plan(scene, &graph),
+            };
             let shots_planned = plan_text.lines().filter(|l| l.starts_with("- ")).count() as u32;
             sink.emit(AgentEvent::Plan {
                 step,
-                plan: plan_text,
+                plan: plan_text.clone(),
                 shots_planned,
             });
+
 
             // 3. ACT — invoke the read_file tool against the scene path
             //    once, so the loop is observably exercising the tool
@@ -168,12 +198,41 @@ impl Agent {
                 result_summary: summary.clone(),
             });
 
-            // 4. REFLECT — canned self-critique. Real phase replaces
-            //    this with an LLM call.
-            let notes = if matches!(result, ToolOutcome::Ok(_)) {
-                "scene read back successfully; references resolve".to_string()
-            } else {
-                format!("tool issue: {summary}")
+            // 4. REFLECT — LLM-backed if an LLM is attached, else
+            //    the canned verdict string. The validation_ok
+            //    field stays driven by `StoryGraph::validate()`
+            //    semantics regardless of LLM presence; we do not
+            //    ask the LLM to second-guess the structural
+            //    validator.
+            let notes = match self.llm.as_ref() {
+                Some(llm) => match llm
+                    .complete_reflect(&crate::llm::ReflectRequest {
+                        scene_id: scene.id.to_string(),
+                        plan: plan_text.clone(),
+                        tool_name: "read_file".to_string(),
+                        tool_args: serde_json::json!({ "path": scene.path.to_string_lossy() }),
+                        tool_result_summary: summary.clone(),
+                        validation_ok: matches!(result, ToolOutcome::Ok(_)),
+                    })
+                    .await
+                {
+                    Ok(text) => text,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "LLM reflect failed; falling back to canned");
+                        if matches!(result, ToolOutcome::Ok(_)) {
+                            "scene read back successfully; references resolve".to_string()
+                        } else {
+                            format!("tool issue: {summary}")
+                        }
+                    }
+                },
+                None => {
+                    if matches!(result, ToolOutcome::Ok(_)) {
+                        "scene read back successfully; references resolve".to_string()
+                    } else {
+                        format!("tool issue: {summary}")
+                    }
+                }
             };
             let validation_ok = matches!(result, ToolOutcome::Ok(_));
             sink.emit(AgentEvent::Reflect {

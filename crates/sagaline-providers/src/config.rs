@@ -100,9 +100,18 @@ impl ProviderConfigSet {
         })
     }
 
-    /// Number of entries (testing / debug).
-    pub fn len(&self) -> usize {
-        self.inner.len()
+    /// Iterate the distinct provider names configured for `capability`.
+    /// Used by the desktop app to pick a default chat / image
+    /// provider at startup. Returns an empty Vec when nothing is
+    /// configured.
+    pub fn providers(&self, capability: Capability) -> Vec<String> {
+        let mut seen = Vec::new();
+        for key in self.inner.keys() {
+            if key.capability == capability && !seen.contains(&key.provider) {
+                seen.push(key.provider.clone());
+            }
+        }
+        seen
     }
 
     pub fn is_empty(&self) -> bool {
