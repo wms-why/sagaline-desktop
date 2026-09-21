@@ -1,3 +1,6 @@
 /target
 Cargo.lock
 .DS_Store
+
+# Local skill cache; reproduce from skills-lock.json.
+.agents/
