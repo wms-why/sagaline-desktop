@@ -224,3 +224,69 @@ async fn default_policy_is_auto() {
     assert_eq!(cfg.commit_policy, CommitPolicy::Auto);
     assert_eq!(cfg.max_steps, 8);
 }
+
+#[tokio::test]
+async fn set_commit_policy_overrides_without_rebuild() {
+    // The activity panel's toggle calls `set_commit_policy` on
+    // the already-built agent; the very next `dispatch_tool`
+    // call must honour the new policy without rebuilding the
+    // tool registry. This pins the Phase 4 UI promise: the
+    // picker takes effect on the next mutation, not on the
+    // next story reload.
+    let (world, ctx) = fresh();
+    let story = world
+        .stories()
+        .create(NewStory {
+            slug: "s",
+            title: "Story",
+            summary: "",
+        })
+        .unwrap();
+
+    let agent = build_agent(world.clone(), CommitPolicy::Auto);
+    assert_eq!(agent.commit_policy(), CommitPolicy::Auto);
+
+    // Flip to Manual — this is the click handler's call.
+    agent.set_commit_policy(CommitPolicy::Manual);
+    assert_eq!(agent.commit_policy(), CommitPolicy::Manual);
+
+    // Next mutate call records, doesn't execute.
+    let result = agent
+        .dispatch_tool(
+            ctx.clone(),
+            "create_character",
+            json!({
+                "story_id": story.id,
+                "slug": "lin-mo",
+                "name": "Lin Mo",
+                "bio": ""
+            }),
+        )
+        .await
+        .expect("tool call");
+    assert!(
+        result.get("proposal_id").is_some(),
+        "manual policy must produce a proposal_id"
+    );
+    assert_eq!(world.characters()._count().unwrap(), 0);
+
+    // Flip back to Auto — next call lands inline.
+    agent.set_commit_policy(CommitPolicy::Auto);
+    assert_eq!(agent.commit_policy(), CommitPolicy::Auto);
+
+    let result = agent
+        .dispatch_tool(
+            ctx.clone(),
+            "create_character",
+            json!({
+                "story_id": story.id,
+                "slug": "detective",
+                "name": "Detective",
+                "bio": ""
+            }),
+        )
+        .await
+        .expect("tool call");
+    assert!(result.get("proposal_id").is_none());
+    assert_eq!(world.characters()._count().unwrap(), 1);
+}

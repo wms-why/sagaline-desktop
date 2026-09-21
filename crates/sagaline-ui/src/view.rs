@@ -34,11 +34,12 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::StatefulInteractiveElement;
 
 use crate::actions::{
-    CreateStory, DeleteProviderKey, ImportProviderKeyFromFile, OpenProjectSettings, OpenStory,
-    ReloadStory, SwitchTab,
+    ApproveProposal, CreateStory, DeleteProviderKey, ImportProviderKeyFromFile,
+    OpenProjectSettings, OpenStory, RefreshPendingProposals, RejectProposal, ReloadStory,
+    SetCommitPolicy, SwitchTab,
 };
-use crate::activity::AgentEventLog;
-use crate::state::{StoryService, StoryServiceSlot, WorkspaceState};
+use crate::activity::{commit_policy_from_index, AgentEventLog};
+use crate::state::{ProposalServiceSlot, StoryService, StoryServiceSlot, WorkspaceState};
 
 use sagaline_bridge::BridgeSlot;
 
@@ -473,6 +474,13 @@ pub fn register_actions(view: Entity<WorkspaceView>, cx: &mut App) {
         let _ = view_for_tab.update(cx, |view, cx| {
             view.set_right_tab(target, cx);
         });
+        // When the user switches to the Activity tab, refresh
+        // the pending-proposals queue so the cards reflect the
+        // latest agent output. The picker header's Refresh
+        // button dispatches the same action manually.
+        if target == RightTab::Activity {
+            cx.dispatch_action(&RefreshPendingProposals);
+        }
     });
 
     let view_for_settings = view.clone();
@@ -502,6 +510,7 @@ pub fn register_actions(view: Entity<WorkspaceView>, cx: &mut App) {
         })
         .detach();
     });
+    let view_for_import = view.clone();
     cx.on_action::<ImportProviderKeyFromFile>(move |action, cx| {
         let Some(store) = cx.try_global::<KeyStoreSlot>().map(|s| s.0.clone()) else {
             return;
@@ -514,7 +523,7 @@ pub fn register_actions(view: Entity<WorkspaceView>, cx: &mut App) {
             multiple: false,
             prompt: Some("Select file containing the API key plaintext".into()),
         });
-        let view_for_refresh = view.clone();
+        let view_for_refresh = view_for_import.clone();
         let store_for_task = store.clone();
         // Read the bridge out of the App *before* entering the
         // spawn closure — inside, `cx` is `&mut AsyncApp`, which
@@ -569,6 +578,191 @@ pub fn register_actions(view: Entity<WorkspaceView>, cx: &mut App) {
                 return;
             }
             let _ = view_for_refresh.update(cx, |_view, cx| cx.notify());
+        })
+        .detach();
+    });
+
+    // ---- proposal picker -------------------------------------------------
+    //
+    // Every handler below:
+    //   1. grabs `ProposalServiceSlot` from the gpui globals (set by
+    //      `sagaline::install_env`),
+    //   2. routes the actual work through `bridge.spawn_blocking` so
+    //      the sync trait methods don't block the gpui executor,
+    //   3. on completion pushes the result back into
+    //      `WorkspaceState` + `cx.notify()`.
+    //
+    // The bridge is captured *before* entering the async closure —
+    // `cx` becomes `&mut AsyncApp` inside `spawn`, which does not
+    // implement `ReadGlobal`.
+
+    let view_for_set_policy = view.clone();
+    cx.on_action::<SetCommitPolicy>(move |action, cx| {
+        let policy = commit_policy_from_index(action.policy);
+        let Some(svc) = cx.try_global::<ProposalServiceSlot>().cloned() else {
+            return;
+        };
+        let bridge = cx.global::<BridgeSlot>().0.clone();
+        let view_for_async = view_for_set_policy.clone();
+        cx.spawn(async move |async_cx| {
+            // The service call is sync but cheap (single
+            // RwLock write + env var set). Routing through
+            // `spawn_blocking` keeps the gpui executor off the
+            // lock for fairness with the agent's own writes.
+            let svc_for_task = svc.0.clone_service();
+            let _ = bridge
+                .spawn_blocking(move || {
+                    svc_for_task.set_commit_policy(policy);
+                })
+                .await;
+            let _ = view_for_async.update(async_cx, |view, cx| {
+                view.state_mut().set_commit_policy(policy);
+                cx.notify();
+            });
+        })
+        .detach();
+    });
+
+    let view_for_refresh_proposals = view.clone();
+    cx.on_action::<RefreshPendingProposals>(move |_, cx| {
+        let Some(svc) = cx.try_global::<ProposalServiceSlot>().cloned() else {
+            return;
+        };
+        let bridge = cx.global::<BridgeSlot>().0.clone();
+        let view_for_async = view_for_refresh_proposals.clone();
+        cx.spawn(async move |async_cx| {
+            let svc_for_task = svc.0.clone_service();
+            let result = bridge
+                .spawn_blocking(move || {
+                    svc_for_task.list_pending_proposals(None)
+                })
+                .await;
+            let Ok(Ok(proposals)) = result else {
+                let err = match result {
+                    Ok(Err(e)) => e,
+                    Err(join_err) => format!("refresh join error: {join_err}"),
+                    _ => String::new(),
+                };
+                if !err.is_empty() {
+                    let _ = view_for_async.update(async_cx, |view, cx| {
+                        view.state_mut().proposal_error = Some(err);
+                        cx.notify();
+                    });
+                }
+                return;
+            };
+            // Pull each proposal's queued actions in the same
+            // worker task so we don't fan out N tasks for what is
+            // typically a small queue.
+            let svc_for_actions = svc.0.clone_service();
+            let proposals_for_actions = proposals.clone();
+            let actions_result = bridge
+                .spawn_blocking(move || {
+                    let mut out = std::collections::BTreeMap::new();
+                    for p in &proposals_for_actions {
+                        match svc_for_actions.list_proposal_actions(&p.id) {
+                            Ok(a) => {
+                                out.insert(p.id.clone(), a);
+                            }
+                            Err(_) => {
+                                out.insert(p.id.clone(), Vec::new());
+                            }
+                        }
+                    }
+                    out
+                })
+                .await;
+            let actions = match actions_result {
+                Ok(map) => map,
+                Err(_) => std::collections::BTreeMap::new(),
+            };
+            let _ = view_for_async.update(async_cx, |view, cx| {
+                view.state_mut().proposal_error = None;
+                view.state_mut()
+                    .set_pending_proposals(proposals, actions);
+                cx.notify();
+            });
+        })
+        .detach();
+    });
+
+    let view_for_approve = view.clone();
+    cx.on_action::<ApproveProposal>(move |action, cx| {
+        let Some(svc) = cx.try_global::<ProposalServiceSlot>().cloned() else {
+            return;
+        };
+        let proposal_id = action.proposal_id.clone();
+        let bridge = cx.global::<BridgeSlot>().0.clone();
+        let view_for_async = view_for_approve.clone();
+        cx.spawn(async move |async_cx| {
+            let svc_for_task = svc.0.clone_service();
+            let pid = proposal_id.clone();
+            let result = bridge
+                .spawn_blocking(move || svc_for_task.approve_proposal(&pid, "user"))
+                .await;
+            match result {
+                Ok(Ok(_n)) => {
+                    let _ = view_for_async.update(async_cx, |view, cx| {
+                        view.state_mut().proposal_error = None;
+                        // Refresh the queue after a successful approve.
+                        cx.dispatch_action(&RefreshPendingProposals);
+                    });
+                }
+                Ok(Err(e)) => {
+                    let msg = e.clone();
+                    let _ = view_for_async.update(async_cx, |view, cx| {
+                        view.state_mut().proposal_error = Some(msg);
+                        cx.notify();
+                    });
+                }
+                Err(join_err) => {
+                    let msg = format!("approve join error: {join_err}");
+                    let _ = view_for_async.update(async_cx, |view, cx| {
+                        view.state_mut().proposal_error = Some(msg);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    });
+
+    let view_for_reject = view.clone();
+    cx.on_action::<RejectProposal>(move |action, cx| {
+        let Some(svc) = cx.try_global::<ProposalServiceSlot>().cloned() else {
+            return;
+        };
+        let proposal_id = action.proposal_id.clone();
+        let bridge = cx.global::<BridgeSlot>().0.clone();
+        let view_for_async = view_for_reject.clone();
+        cx.spawn(async move |async_cx| {
+            let svc_for_task = svc.0.clone_service();
+            let pid = proposal_id.clone();
+            let result = bridge
+                .spawn_blocking(move || svc_for_task.reject_proposal(&pid, "user"))
+                .await;
+            match result {
+                Ok(Ok(())) => {
+                    let _ = view_for_async.update(async_cx, |view, cx| {
+                        view.state_mut().proposal_error = None;
+                        cx.dispatch_action(&RefreshPendingProposals);
+                    });
+                }
+                Ok(Err(e)) => {
+                    let msg = e.clone();
+                    let _ = view_for_async.update(async_cx, |view, cx| {
+                        view.state_mut().proposal_error = Some(msg);
+                        cx.notify();
+                    });
+                }
+                Err(join_err) => {
+                    let msg = format!("reject join error: {join_err}");
+                    let _ = view_for_async.update(async_cx, |view, cx| {
+                        view.state_mut().proposal_error = Some(msg);
+                        cx.notify();
+                    });
+                }
+            }
         })
         .detach();
     });
@@ -677,14 +871,7 @@ fn render_right_pane(
     let tabs = render_tab_bar(tab, activity_count);
     let body: gpui_kit::Div = match tab {
         RightTab::Preview => render_preview(state, cx),
-        RightTab::Activity => match log {
-            Some(log) => crate::activity::render_activity(log),
-            None => div()
-                .flex_1()
-                .h_full()
-                .p_2()
-                .child("Activity log not installed (binary mode)."),
-        },
+        RightTab::Activity => crate::activity::render_activity(state, log, cx),
         RightTab::Keys => render_keys_panel(cx),
     };
     v_flex().flex_1().h_full().child(tabs).child(body)

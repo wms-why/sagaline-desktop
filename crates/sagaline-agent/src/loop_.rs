@@ -26,7 +26,7 @@ use futures::StreamExt;
 
 use crate::event::{AgentEvent, EventSink};
 use crate::tool::{ToolError, ToolRegistry};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// How the loop dispatches `Capability::Mutate` tool calls.
 ///
@@ -89,6 +89,12 @@ pub enum StepOutcome {
 /// The agent. Cheap to construct; holds a tool registry and a sink.
 pub struct Agent {
     config: AgentConfig,
+    /// Live [`CommitPolicy`]. The UI's activity-panel picker
+    /// calls [`Self::set_commit_policy`] to flip this; the next
+    /// [`Self::dispatch_tool`] call inside the same agent loop
+    /// honours the new value without rebuilding the agent. Seeded
+    /// from [`AgentConfig::commit_policy`] at construction.
+    commit_policy: Arc<RwLock<CommitPolicy>>,
     /// `Arc` so [`Self::run_stream`] can move a clone into its
     /// `Send + 'static` stream body. Registration must happen
     /// before the `Agent` is shared — `Arc::get_mut` returns
@@ -105,10 +111,27 @@ impl Agent {
 
     pub fn with_config(config: AgentConfig) -> Self {
         Self {
-            config,
+            config: config.clone(),
+            commit_policy: Arc::new(RwLock::new(config.commit_policy)),
             tools: std::sync::Arc::new(ToolRegistry::new()),
             llm: None,
         }
+    }
+
+    /// Current [`CommitPolicy`]. Cheap; reads the live override.
+    pub fn commit_policy(&self) -> CommitPolicy {
+        *self.commit_policy.read().expect("commit_policy lock poisoned")
+    }
+
+    /// Flip the live [`CommitPolicy`]. Takes effect on the next
+    /// [`Self::dispatch_tool`] call inside the same agent loop
+    /// — does not retroactively change pending proposals, and
+    /// does NOT touch the world DB or any in-flight tool call.
+    /// The activity panel's `Offerular` toggle dispatches this
+    /// through [`crate::ProposalService`] when the user clicks
+    /// Auto / Manual.
+    pub fn set_commit_policy(&self, policy: CommitPolicy) {
+        *self.commit_policy.write().expect("commit_policy lock poisoned") = policy;
     }
 
     /// Attach an LLM client. With an LLM attached, the loop
@@ -128,6 +151,14 @@ impl Agent {
     /// pipeline.
     pub fn tools_mut(&mut self) -> &mut ToolRegistry {
         std::sync::Arc::get_mut(&mut self.tools).expect("Agent::tools_mut: registry already shared")
+    }
+
+    /// Shared handle to the tool registry. Cheap (bump refcount).
+    /// Used by [`crate::ProposalService`] to look up
+    /// `approve_proposal` / `reject_proposal` and dispatch them
+    /// through the same registry the agent loop uses.
+    pub fn tools(&self) -> Arc<ToolRegistry> {
+        self.tools.clone()
     }
 
     /// Dispatch a single tool call through this agent, honoring
@@ -162,7 +193,7 @@ impl Agent {
                     name: tool_name.to_string(),
                 })?;
 
-        if matches!(self.config.commit_policy, CommitPolicy::Manual)
+        if matches!(self.commit_policy(), CommitPolicy::Manual)
             && tool.descriptor().capability == Capability::Mutate
         {
             // Record-only path. The recorded args (without

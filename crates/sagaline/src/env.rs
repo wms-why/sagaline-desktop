@@ -27,7 +27,7 @@ use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use tracing::warn;
 
-use sagaline_agent::Agent;
+use sagaline_agent::{Agent, CommitPolicy};
 use sagaline_core::{FileStoryStore, ProjectLocation, StoryStore};
 use sagaline_store::World;
 use sagaline_providers::{ProviderConfigError, ProviderConfigSet, ProviderRegistry};
@@ -79,6 +79,19 @@ pub struct AppEnv {
     /// Storage-agnostic story store. `None` until the user picks a
     /// project location in Settings; the UI surfaces this gap.
     story_store: Arc<RwLock<Option<Arc<dyn StoryStore>>>>,
+    /// Live [`CommitPolicy`]. The UI's activity-panel picker
+    /// calls [`Self::set_commit_policy`] to flip this; the
+    /// value is then pushed into the running [`Agent`] (if any)
+    /// so its next [`sagaline_agent::Agent::dispatch_tool`]
+    /// call sees the new policy without rebuilding the loop.
+    /// Seeded from `SAGALINE_COMMIT_POLICY` at [`Self::open_at`].
+    commit_policy: Arc<RwLock<CommitPolicy>>,
+    /// Most recently built agent. The UI's
+    /// [`crate::service::AppEnvProposalService`] reaches it via
+    /// this handle to flip the live policy and to dispatch the
+    /// `approve_proposal` / `reject_proposal` tools. `None` until
+    /// [`Self::build_agent`] runs for the first time.
+    agent: Arc<RwLock<Option<Arc<Agent>>>>,
 }
 
 impl AppEnv {
@@ -117,6 +130,7 @@ impl AppEnv {
                 .build()
                 .map_err(|e| EnvError::Runtime(e.to_string()))?,
         );
+        let commit_policy = parse_commit_policy_env();
         Ok(Self {
             data_dir,
             store: Arc::new(store),
@@ -125,6 +139,8 @@ impl AppEnv {
             runtime,
             prefs: Arc::new(RwLock::new(prefs)),
             story_store: Arc::new(RwLock::new(story_store)),
+            commit_policy: Arc::new(RwLock::new(commit_policy)),
+            agent: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -180,11 +196,21 @@ impl AppEnv {
     /// tier). The story id is supplied at `run_stream` time, so
     /// this method no longer needs a Markdown story path.
     ///
-    /// `commit_policy` is read from `SAGALINE_COMMIT_POLICY`:
-    /// `auto` (default) | `manual` (route mutations through the
-    /// Proposal → Commit gate). Unknown values fall back to Auto
-    /// with a `tracing::warn!`.
-    pub fn build_agent(&self, _story_root: &Path) -> Agent {
+    /// Returns `Arc<Agent>` so the
+    /// [`crate::service::AppEnvProposalService`] can reach the
+    /// same instance via [`Self::agent`]. The returned agent is
+    /// also stored in `self.agent` so callers that drop the
+    /// return value still see the same instance.
+    ///
+    /// [`AgentConfig::commit_policy`] is seeded from the live
+    /// [`Self::commit_policy`] slot, which was populated from
+    /// `SAGALINE_COMMIT_POLICY` at startup (or by the UI's
+    /// activity-panel picker since then). The UI toggle calls
+    /// [`Self::set_commit_policy`] which pushes the new value
+    /// into the stored agent so the next
+    /// [`sagaline_agent::Agent::dispatch_tool`] call inside the
+    /// same loop honours it without rebuilding the agent.
+    pub fn build_agent(&self, _story_root: &Path) -> Arc<Agent> {
         use sagaline_agent::tools::{
             AddCharacterAgeTool, AddCharacterAppearanceTool, ApproveProposalTool,
             AssignCharacterToSceneTool, AssignEnvironmentToSceneTool, CreateChapterTool,
@@ -193,20 +219,9 @@ impl AppEnv {
             ListStoriesTool, ProposeChangeTool, RejectProposalTool, SearchStoryTool,
             UpdateCharacterTool, ValidateWorldTool,
         };
-        use sagaline_agent::{AgentConfig, CommitPolicy};
+        use sagaline_agent::AgentConfig;
 
-        let commit_policy = match std::env::var_os("SAGALINE_COMMIT_POLICY") {
-            Some(v) if v == "manual" => CommitPolicy::Manual,
-            Some(v) if v == "auto" => CommitPolicy::Auto,
-            Some(other) => {
-                tracing::warn!(
-                    policy = %other.to_string_lossy(),
-                    "unknown SAGALINE_COMMIT_POLICY; defaulting to Auto"
-                );
-                CommitPolicy::Auto
-            }
-            None => CommitPolicy::Auto,
-        };
+        let commit_policy = *self.commit_policy.read().expect("commit_policy lock poisoned");
         let mut agent = Agent::with_config(AgentConfig {
             commit_policy,
             ..AgentConfig::default()
@@ -274,7 +289,44 @@ impl AppEnv {
         if let Some(llm) = self.try_build_llm() {
             agent = agent.with_llm(llm);
         }
+        let agent = Arc::new(agent);
+        *self.agent.write().expect("agent lock poisoned") = Some(agent.clone());
         agent
+    }
+
+    /// The most recently built [`Agent`], or `None` until
+    /// [`Self::build_agent`] runs for the first time. The
+    /// proposal service holds the same instance to dispatch
+    /// `approve_proposal` / `reject_proposal` and to flip the
+    /// live [`CommitPolicy`].
+    pub fn agent(&self) -> Option<Arc<Agent>> {
+        self.agent.read().expect("agent lock poisoned").clone()
+    }
+
+    /// Current live [`CommitPolicy`]. Cheap; reads the
+    /// [`Self::commit_policy`] slot the UI toggle also mutates.
+    pub fn commit_policy(&self) -> CommitPolicy {
+        *self.commit_policy.read().expect("commit_policy lock poisoned")
+    }
+
+    /// Flip the live [`CommitPolicy`]. Pushes the new value into
+    /// the running [`Agent`] (if any) so its next
+    /// [`sagaline_agent::Agent::dispatch_tool`] call sees it
+    /// without rebuilding the loop. Also mirrors the value into
+    /// `SAGALINE_COMMIT_POLICY` so a process restart inherits
+    /// the same policy.
+    pub fn set_commit_policy(&self, policy: CommitPolicy) {
+        *self.commit_policy.write().expect("commit_policy lock poisoned") = policy;
+        let raw = match policy {
+            CommitPolicy::Auto => "auto",
+            CommitPolicy::Manual => "manual",
+        };
+        // `set_var` is fine on the main process; tests should
+        // not depend on this behaviour.
+        std::env::set_var("SAGALINE_COMMIT_POLICY", raw);
+        if let Some(agent) = self.agent.read().expect("agent lock poisoned").as_ref() {
+            agent.set_commit_policy(policy);
+        }
     }
 
     /// Snapshot the current story location (the path the
@@ -342,4 +394,24 @@ pub enum EnvError {
     Prefs(#[from] PrefsError),
     #[error("failed to start Tokio runtime: {0}")]
     Runtime(String),
+}
+
+/// Resolve [`CommitPolicy`] from `SAGALINE_COMMIT_POLICY` at
+/// startup. `auto` | `manual` | unset → defaults; unknown values
+/// fall back to [`CommitPolicy::Auto`] with a `tracing::warn!`.
+/// The same logic lives in [`AppEnv::set_commit_policy`] for the
+/// reverse direction (live toggle → env var mirror).
+fn parse_commit_policy_env() -> CommitPolicy {
+    match std::env::var_os("SAGALINE_COMMIT_POLICY") {
+        Some(v) if v == "manual" => CommitPolicy::Manual,
+        Some(v) if v == "auto" => CommitPolicy::Auto,
+        Some(other) => {
+            tracing::warn!(
+                policy = %other.to_string_lossy(),
+                "unknown SAGALINE_COMMIT_POLICY; defaulting to Auto"
+            );
+            CommitPolicy::Auto
+        }
+        None => CommitPolicy::Auto,
+    }
 }

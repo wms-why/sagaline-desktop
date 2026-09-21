@@ -9,12 +9,19 @@
 //! - [`register_actions`] — bind the UI's actions
 //!   ([`actions::OpenStory`], [`actions::ReloadStory`],
 //!   [`actions::SwitchTab`], [`actions::ImportProviderKeyFromFile`],
-//!   [`actions::DeleteProviderKey`]) to handlers.
+//!   [`actions::DeleteProviderKey`],
+//!   [`actions::SetCommitPolicy`],
+//!   [`actions::RefreshPendingProposals`],
+//!   [`actions::ApproveProposal`],
+//!   [`actions::RejectProposal`]) to handlers.
 //! - [`actions`] — the action types.
 //! - [`activity::AgentEventLog`] — the gpui global the app shell pushes
 //!   agent events into; the activity panel reads it.
 //! - [`KeyStoreSlot`] — the gpui global carrying the encrypted
 //!   [`sagaline_store::World`]; the BYOK panel reads it.
+//! - [`ProposalServiceSlot`] — the gpui global carrying the
+//!   [`ProposalService`] the activity panel's commit-policy picker
+//!   and approve / reject buttons talk through.
 #![deny(unsafe_code)]
 
 pub mod actions;
@@ -23,14 +30,16 @@ pub mod state;
 pub mod view;
 pub use view::{register_actions, StoryOpened, WorkspaceView};
 pub use actions::{
-    CreateStory, DeleteProviderKey, ImportProviderKeyFromFile, OpenProjectSettings,
-    OpenStory, ReloadStory, SwitchTab,
+    ApproveProposal, CreateStory, DeleteProviderKey, ImportProviderKeyFromFile,
+    OpenProjectSettings, OpenStory, RefreshPendingProposals, RejectProposal, ReloadStory,
+    SetCommitPolicy, SwitchTab,
 };
 pub use activity::{format_event, render_activity, AgentEventLog};
 pub use state::WorkspaceState;
 pub use state::KeyStoreSlot;
 pub use state::StoryService;
 pub use state::StoryServiceSlot;
+pub use state::{ProposalService, ProposalServiceSlot};
 
 /// Generic gpui global slot that holds an `Arc<T>`. The binary crate
 /// instantiates it with the concrete [`sagaline::AppEnv`] (or any

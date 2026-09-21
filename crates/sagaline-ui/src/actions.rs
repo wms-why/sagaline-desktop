@@ -50,6 +50,43 @@ pub struct DeleteProviderKey {
     pub key_id: String,
 }
 
+/// Flip the live [`sagaline_agent::CommitPolicy`]. Dispatched by
+/// the Auto / Manual buttons on the activity panel. `policy` is
+/// the same 0/1 numeric convention [`SwitchTab`] uses: `0` =
+/// Auto, `1` = Manual. The handler forwards to the
+/// [`crate::state::ProposalService`] global; the binary's impl
+/// pushes the new value into the running agent and mirrors it
+/// into `SAGALINE_COMMIT_POLICY`.
+#[derive(Clone, Action, PartialEq, Eq, Deserialize)]
+#[action(namespace = ui, no_json)]
+pub struct SetCommitPolicy {
+    pub policy: u32,
+}
+
+/// Re-fetch the pending-proposals queue from the world DB and
+/// update the activity panel. Dispatched by the Refresh button on
+/// the activity panel and implicitly when the user switches to the
+/// Activity tab.
+#[derive(Clone, Action, PartialEq, Eq, Deserialize)]
+#[action(namespace = ui, no_json)]
+pub struct RefreshPendingProposals;
+
+/// Run `approve_proposal` against the agent's tool registry.
+/// `proposal_id` is the [`sagaline_store::ProposalRow::id`] the
+/// activity panel is showing.
+#[derive(Clone, Action, PartialEq, Eq, Deserialize)]
+#[action(namespace = ui, no_json)]
+pub struct ApproveProposal {
+    pub proposal_id: String,
+}
+
+/// Run `reject_proposal` against the agent's tool registry.
+#[derive(Clone, Action, PartialEq, Eq, Deserialize)]
+#[action(namespace = ui, no_json)]
+pub struct RejectProposal {
+    pub proposal_id: String,
+}
+
 gpui_kit::actions!(
     sagaline,
     [

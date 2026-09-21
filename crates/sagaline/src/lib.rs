@@ -45,6 +45,16 @@ pub fn install_env(cx: &mut App) -> Result<Arc<AppEnv>, EnvError> {
     cx.set_global::<sagaline_ui::StoryServiceSlot>(
         sagaline_ui::StoryServiceSlot(Box::new(AppEnvStoryService::new(env.clone()))),
     );
+    // The activity panel's commit-policy picker + approve /
+    // reject buttons call into `ProposalService`. The binary
+    // owns the concrete impl (which holds `Arc<AppEnv>` and
+    // routes through the agent's tool registry); the UI only
+    // sees the trait object.
+    cx.set_global::<sagaline_ui::ProposalServiceSlot>(
+        sagaline_ui::ProposalServiceSlot(Box::new(
+            crate::service::AppEnvProposalService::new(env.clone()),
+        )),
+    );
     // The Tokio ↔ GPUI bridge. GPUI tasks run on their own
     // scheduler (not Tokio), so anything that touches `tokio::fs`
     // / `tokio::task::spawn_blocking` / `reqwest` must route
