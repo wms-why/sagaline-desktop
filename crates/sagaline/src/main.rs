@@ -4,8 +4,9 @@
 //   1. `gpui_kit::init` brings up the styled components and the
 //      base widget layer.
 //   2. `sagaline::install_env` opens (or creates) the
-//      `~/.sageline/data/` store, parses `config.toml`, and installs
-//      the resulting `AppEnv` as a gpui global.
+//      `~/.sageline/data/` store, parses `config.toml`, loads the
+//      `prefs.toml` project location, and installs the resulting
+//      `AppEnv` as a gpui global.
 //   3. The window opens, showing the workspace view from
 //      `sagaline-ui`.
 //   4. When the user opens a story (⌘ O), the view emits
@@ -15,8 +16,10 @@
 //      activity panel automatically.
 //
 // Key bindings:
+//   ⌘ N       — New story (opens the onboarding modal)
 //   ⌘ O       — Open Story
 //   ⌘ R       — Reload current story
+//   ⌘ ,       — Project Settings
 
 use gpui_kit::component::Root;
 use gpui_kit::*;
@@ -26,7 +29,11 @@ use sagaline::{install_env, run_agent};
 
 mod key_bindings {
     use gpui_kit::KeyBinding;
-    use sagaline_ui::{OpenStory, ReloadStory};
+    use sagaline_ui::{CreateStory, OpenProjectSettings, OpenStory, ReloadStory};
+
+    pub fn new_story() -> KeyBinding {
+        KeyBinding::new("cmd-n", CreateStory, None)
+    }
 
     pub fn open_story() -> KeyBinding {
         KeyBinding::new("cmd-o", OpenStory, None)
@@ -34,6 +41,10 @@ mod key_bindings {
 
     pub fn reload_story() -> KeyBinding {
         KeyBinding::new("cmd-r", ReloadStory, None)
+    }
+
+    pub fn project_settings() -> KeyBinding {
+        KeyBinding::new("cmd-,", OpenProjectSettings, None)
     }
 }
 
@@ -44,8 +55,10 @@ fn main() {
         let env = install_env(cx).expect("install AppEnv");
 
         cx.bind_keys([
+            key_bindings::new_story(),
             key_bindings::open_story(),
             key_bindings::reload_story(),
+            key_bindings::project_settings(),
         ]);
 
         cx.spawn(async move |cx| {
@@ -59,9 +72,9 @@ fn main() {
                 // (e.g. a future "recent stories" menu).
                 let env_for_sub = env.clone();
                 cx.subscribe(&view, move |_view, event: &StoryOpened, cx| {
-                    let story_path = event.path.clone();
+                    let story = event.story.clone();
                     let env = env_for_sub.clone();
-                    run_agent(env, story_path, cx);
+                    run_agent(env, story, cx);
                 })
                 .detach();
 

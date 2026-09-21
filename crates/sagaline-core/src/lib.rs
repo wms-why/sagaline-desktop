@@ -1,12 +1,20 @@
-//! Sagaline story workspace — Markdown Source of Truth, file-system graph.
+//! Sagaline story domain — types and Markdown render layer.
 //!
-//! The whole story is a directory of Markdown + YAML front-matter files. There
-//! is no embedded database in this crate: [`StoryGraph::load`] walks the
-//! directory once and produces an in-memory graph of [`ParsedEntity`]s and the
-//! [`Reference`]s between them. Validation runs in memory against the same
-//! graph.
+//! The Source of Truth lives in `sagaline-store` (a SQLite world DB).
+//! This crate contributes:
 //!
-//! See [`graph`] for the entry points and [`entity`] for the type vocabulary.
+//! - the **domain types** ([`Story`], [`Bible`], [`Character`],
+//!   [`Environment`], [`Prop`], [`Chapter`], [`Scene`], [`Shot`],
+//!   [`Reference`]) shared between the store, the agent tools,
+//!   and the UI;
+//! - the **Markdown render layer** ([`frontmatter`], [`render`]) used
+//!   by the agent's context compiler and by the preview pane in
+//!   `sagaline-ui`.
+//!
+//! No filesystem I/O lives here anymore. Reads flow through
+//! `sagaline-store`; this crate only knows how to format what it
+//! reads. Validation runs against the in-memory domain types
+//! ([`entity`]) and is invoked by the agent's reflection step.
 
 pub mod entity;
 pub mod error;
@@ -14,11 +22,16 @@ pub mod frontmatter;
 pub mod graph;
 pub mod markdown;
 pub mod path;
-pub mod schema;
+pub mod render;
+pub mod story;
 pub mod shot;
 pub mod story_root;
 
 pub use entity::{EntityId, EntityType, ParsedEntity, Reference, ReferenceKind};
 pub use error::{CoreError, ValidationError};
 pub use graph::StoryGraph;
+pub use render::render_preview_lines;
+pub use story::{
+    FileStoryStore, ProjectLocation, Story, StoryHandle, StoryStore, StorySummary,
+};
 pub use story_root::StoryRoot;

@@ -1,44 +1,125 @@
 //! End-to-end smoke test for the agent loop.
 //!
-//! Spins up a temp story directory with one character, one environment,
-//! one scene, runs the agent, and asserts the event stream shape.
+//! Phase 2.5: spins up an in-memory SQLite world with one
+//! character, one environment, one chapter, one scene, runs
+//! the agent, and asserts the event stream shape.
 
-use std::fs;
-use std::path::PathBuf;
+use std::sync::Arc;
 
-use sagaline_agent::{Agent, AgentEvent, EventSink, StepOutcome, Tool};
-use sagaline_agent::tools::ReadFileTool;
-use sagaline_core::StoryRoot;
-use tempfile::tempdir;
+use sagaline_agent::tools::{
+    AssignCharacterToSceneTool, AssignEnvironmentToSceneTool, CreateChapterTool,
+    CreateCharacterTool, CreateEnvironmentTool, CreateSceneTool, ValidateWorldTool,
+};
+use sagaline_agent::{Agent, AgentConfig, AgentEvent, EventSink, StepOutcome, ToolRegistry};
+use sagaline_store::repo::{NewChapter, NewCharacter, NewEnvironment, NewScene, NewStory};
+use sagaline_store::World;
 
-fn write(p: &std::path::Path, body: &str) {
-    fs::write(p, body).unwrap();
+fn build_world() -> (Arc<World>, String) {
+    let world = Arc::new(World::in_memory().expect("in-memory world"));
+    let story = world
+        .stories()
+        .create(NewStory {
+            slug: "demo",
+            title: "Demo",
+            summary: "",
+        })
+        .unwrap();
+    world
+        .characters()
+        .create(NewCharacter {
+            story_id: &story.id,
+            slug: "lin-mo",
+            name: "Lin Mo",
+            occupation: None,
+            bio: "",
+        })
+        .unwrap();
+    world
+        .environments()
+        .create(NewEnvironment {
+            story_id: &story.id,
+            slug: "laboratory",
+            name: "Laboratory",
+            description: "",
+        })
+        .unwrap();
+    let chapter = world
+        .scenes()
+        .create_chapter(NewChapter {
+            story_id: &story.id,
+            slug: "001-start",
+            ordinal: 1,
+            title: "Start",
+            synopsis: "",
+        })
+        .unwrap();
+    let scene = world
+        .scenes()
+        .create_scene(NewScene {
+            chapter_id: &chapter.id,
+            slug: "001-intro",
+            ordinal: 1,
+            title: "Intro",
+            synopsis: "Lin Mo walks into the lab.",
+        })
+        .unwrap();
+    let lin_mo = world
+        .characters()
+        .list_for_story(&story.id)
+        .unwrap()
+        .into_iter()
+        .find(|c| c.slug == "lin-mo")
+        .unwrap();
+    let lab = world
+        .environments()
+        .list_for_story(&story.id)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.slug == "laboratory")
+        .unwrap();
+    // Manually assign the scene's character + environment.
+    {
+        let conn = world.conn().unwrap();
+        conn.execute(
+            "INSERT INTO scene_characters (scene_id, character_id)
+             VALUES (?1, ?2)",
+            rusqlite::params![scene.id, lin_mo.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scene_environments (scene_id, environment_id)
+             VALUES (?1, ?2)",
+            rusqlite::params![scene.id, lab.id],
+        )
+        .unwrap();
+    }
+    (world, story.id)
 }
 
-fn build_story(root: &std::path::Path) {
-    write(
-        &root.join("story.md"),
-        "---\nid: story_demo\ntype: story\nslug: demo\ncreated_at: 2026-09-15T00:00:00Z\nupdated_at: 2026-09-15T00:00:00Z\n---\ndemo\n",
-    );
-    fs::create_dir_all(root.join("characters/lin-mo")).unwrap();
-    write(
-        &root.join("characters/lin-mo/character.md"),
-        "---\nid: character_lin-mo\ntype: character\nslug: lin-mo\ncreated_at: 2026-09-15T00:00:00Z\nupdated_at: 2026-09-15T00:00:00Z\n---\n林默\n",
-    );
-    fs::create_dir_all(root.join("environments/laboratory")).unwrap();
-    write(
-        &root.join("environments/laboratory/environment.md"),
-        "---\nid: environment_laboratory\ntype: environment\nslug: laboratory\ncreated_at: 2026-09-15T00:00:00Z\nupdated_at: 2026-09-15T00:00:00Z\n---\n实验室\n",
-    );
-    fs::create_dir_all(root.join("chapters/001-start/scenes")).unwrap();
-    write(
-        &root.join("chapters/001-start/chapter.md"),
-        "---\nid: chapter_001-start\ntype: chapter\nslug: 001-start\ncreated_at: 2026-09-15T00:00:00Z\nupdated_at: 2026-09-15T00:00:00Z\n---\n第一章\n",
-    );
-    write(
-        &root.join("chapters/001-start/scenes/001-intro.md"),
-        "---\nid: scene_001_intro\ntype: scene\nslug: 001-intro\ncharacters: [lin-mo]\nenvironment: laboratory\ncreated_at: 2026-09-15T00:00:00Z\nupdated_at: 2026-09-15T00:00:00Z\n---\n林默走进实验室\n",
-    );
+fn build_agent(world: Arc<World>) -> Agent {
+    let mut agent = Agent::with_config(AgentConfig::default());
+    agent
+        .tools_mut()
+        .register(ValidateWorldTool::new(world.clone()));
+    agent
+        .tools_mut()
+        .register(CreateCharacterTool::new(world.clone()));
+    agent
+        .tools_mut()
+        .register(CreateEnvironmentTool::new(world.clone()));
+    agent
+        .tools_mut()
+        .register(CreateChapterTool::new(world.clone()));
+    agent
+        .tools_mut()
+        .register(CreateSceneTool::new(world.clone()));
+    agent
+        .tools_mut()
+        .register(AssignCharacterToSceneTool::new(world.clone()));
+    agent
+        .tools_mut()
+        .register(AssignEnvironmentToSceneTool::new(world.clone()));
+    agent
 }
 
 #[derive(Default)]
@@ -54,17 +135,10 @@ impl EventSink for Collect {
 
 #[tokio::test]
 async fn loop_emits_one_full_pass_per_scene() {
-    let dir = tempdir().unwrap();
-    build_story(dir.path());
-
-    // Sanity: core can load the story.
-    let root = StoryRoot::new(dir.path()).expect("story root");
-    let graph = sagaline_core::StoryGraph::load(&root).expect("graph");
-    assert!(graph.validate().is_ok(), "fixture must validate");
-    let mut agent = Agent::new();
-    agent.tools_mut().register(ReadFileTool::new(dir.path()));
+    let (world, story_id) = build_world();
+    let agent = build_agent(world.clone());
     let mut sink = Collect::default();
-    let outcome = agent.run(dir.path(), &mut sink).await.expect("run");
+    let outcome = agent.run(world, &story_id, &mut sink).await.expect("run");
 
     assert_eq!(outcome, StepOutcome::Complete);
 
@@ -94,33 +168,50 @@ async fn loop_emits_one_full_pass_per_scene() {
             _ => None,
         })
         .expect("observe event");
-    assert_eq!(observe.characters, vec!["character_lin-mo"]);
-    assert_eq!(observe.environment.as_deref(), Some("environment_laboratory"));
+    assert_eq!(observe.characters.len(), 1);
+    assert!(observe.environment.is_some());
 
-    // The Act event invoked the read_file tool.
+    // The Act event invoked validate_world.
     let act = sink
         .events
         .iter()
         .find_map(|e| match e {
-            AgentEvent::Act { tool, result_summary, .. } => Some((tool, result_summary)),
+            AgentEvent::Act {
+                tool,
+                result_summary,
+                ..
+            } => Some((tool, result_summary)),
             _ => None,
         })
         .expect("act event");
-    assert_eq!(act.0, "read_file");
-    assert!(act.1.ends_with(" bytes"), "summary should report bytes: {act:?}");
-
-    // Reflect must have passed (the read succeeded).
-    let reflect_ok = sink.events.iter().any(
-        |e| matches!(e, AgentEvent::Reflect { validation_ok: true, .. }),
+    assert_eq!(act.0, "validate_world");
+    assert_eq!(
+        act.1, "ok",
+        "validate_world should report ok for a clean story"
     );
+
+    // Reflect must have passed.
+    let reflect_ok = sink.events.iter().any(|e| {
+        matches!(
+            e,
+            AgentEvent::Reflect {
+                validation_ok: true,
+                ..
+            }
+        )
+    });
     assert!(reflect_ok, "expected at least one passing reflect");
 }
 
 #[test]
-fn tool_descriptor_advertises_json_schema() {
-    let t = ReadFileTool::new(PathBuf::new());
-    let d = t.descriptor();
-    assert_eq!(d.name, "read_file");
-    let json = serde_json::to_string(&d.parameters).unwrap();
-    assert!(json.contains("\"path\""), "schema missing `path`: {json}");
+fn tool_registry_into_arc_shares_tools() {
+    // Sanity: cloning a registry and wrapping it in Arc keeps
+    // the tool lookups working. ApproveProposalTool relies on
+    // this.
+    let world = Arc::new(World::in_memory().unwrap());
+    let mut reg = ToolRegistry::new();
+    reg.register(ValidateWorldTool::new(world.clone()));
+    let arc = reg.into_arc();
+    let t = arc.get("validate_world").expect("registered");
+    assert_eq!(t.descriptor().name, "validate_world");
 }

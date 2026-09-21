@@ -32,7 +32,7 @@ use rig_core::providers::openai::completion::GenericCompletionModel;
 use serde::Serialize;
 use thiserror::Error;
 
-use sagaline_core::ParsedEntity;
+use sagaline_store::repo::SceneRow;
 
 use crate::event::ResolvedContext;
 
@@ -124,7 +124,11 @@ impl LlmClient for RigLlm {
         let prompt = format!("{system}\n\n```json\n{user}\n```");
         let response = self
             .model
-            .completion(self.model.completion_request(Message::user(&prompt)).build())
+            .completion(
+                self.model
+                    .completion_request(Message::user(&prompt))
+                    .build(),
+            )
             .await?;
         extract_assistant_text(&response).ok_or(LlmError::Empty)
     }
@@ -135,7 +139,11 @@ impl LlmClient for RigLlm {
         let prompt = format!("{system}\n\n```json\n{user}\n```");
         let response = self
             .model
-            .completion(self.model.completion_request(Message::user(&prompt)).build())
+            .completion(
+                self.model
+                    .completion_request(Message::user(&prompt))
+                    .build(),
+            )
             .await?;
         extract_assistant_text(&response).ok_or(LlmError::Empty)
     }
@@ -145,9 +153,7 @@ impl LlmClient for RigLlm {
 /// text content block. Tool calls (which we deliberately do not
 /// advertise in PLAN/REFLECT) are skipped — they're never
 /// expected to appear here.
-fn extract_assistant_text(
-    response: &rig_core::completion::CompletionResponse,
-) -> Option<String> {
+fn extract_assistant_text(response: &rig_core::completion::CompletionResponse) -> Option<String> {
     use rig_core::completion::AssistantContent;
     let mut out = String::new();
     for content in &response.choice {
@@ -174,21 +180,25 @@ pub fn tool_summaries(registry: &crate::tool::ToolRegistry) -> Vec<ToolSummary> 
         .map(|d| ToolSummary {
             name: d.name,
             description: d.description,
-            parameters: serde_json::to_value(&d.parameters)
-                .expect("RootSchema is JSON-safe"),
+            parameters: serde_json::to_value(&d.parameters).expect("RootSchema is JSON-safe"),
         })
         .collect()
 }
 
-/// Extract the Markdown body of a scene for the PLAN prompt.
-/// Helper kept here so the agent doesn't need to know how to
-/// phrase scene metadata for the LLM.
-pub fn scene_body(scene: &ParsedEntity) -> String {
+/// Extract the scene's synopsis for the PLAN prompt. Phase 2.5:
+/// the loop drives SQLite so there's no Markdown body to extract;
+/// the synopsis column carries the scene description. Falls back
+/// to the slug if synopsis is empty.
+pub fn scene_body(scene: &SceneRow) -> String {
     let mut out = String::new();
-    if let Some(title) = scene.frontmatter.get("title").and_then(|v| v.as_str()) {
-        out.push_str(&format!("# {title}\n\n"));
+    out.push_str(&format!("# {}\n\n", scene.title));
+    let body = scene.synopsis.trim();
+    if body.is_empty() {
+        out.push_str(&format!("(slug: {})\n", scene.slug));
+    } else {
+        out.push_str(body);
+        out.push('\n');
     }
-    out.push_str(scene.body.trim());
     out
 }
 

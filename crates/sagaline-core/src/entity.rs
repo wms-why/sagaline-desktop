@@ -132,3 +132,27 @@ pub struct ParsedEntity {
     pub frontmatter: serde_yaml::Value,
     pub body: String,
 }
+
+impl ParsedEntity {
+    /// The user-facing title for this entity (pulled from the
+    /// `title:` front-matter field). Returns `None` if the field
+    /// is absent or empty.
+    pub fn title(&self) -> Option<String> {
+        self.frontmatter
+            .get("title")
+            .and_then(serde_yaml::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    /// The first non-empty line of the body, trimmed. Used by the
+    /// preview pane as a one-line summary.
+    pub fn summary(&self) -> Option<String> {
+        self.body
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(str::to_string)
+    }
+}

@@ -17,7 +17,7 @@
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use sagaline_keys::KeyHandle;
+use sagaline_store::KeyHandle;
 use sagaline_providers::minimax::MinimaxImage;
 use sagaline_providers::{
     Capability, GenerationRequest, ImageGen, ModelAdapter, ProviderError,

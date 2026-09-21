@@ -29,7 +29,7 @@
 //! - Public per-provider config (`base_url`, default model) lives
 //!   in `~/.sageline/data/config.toml`. Plaintext; no secrets.
 //! - Private keys live in `~/.sageline/data/keys.db`, age-encrypted.
-//!   See `sagaline_keys::KeyStore`.
+//!   See `sagaline_store::repo::key::KeyRepo`.
 //!
 //! ## Provider selection
 //!

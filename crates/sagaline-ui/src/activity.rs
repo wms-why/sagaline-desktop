@@ -5,9 +5,14 @@
 //! **Activity** (a live scrollback of the agent's `AgentEvent`
 //! stream).
 //!
-//! Events are appended by the app shell's `ChannelSink` forwarder; the
-//! UI reads them through the gpui global [`AgentEventLog`]. The
-//! [`render_activity`] function does the actual rendering.
+//! Events are appended by the app shell's stream forwarder
+//! (`run_agent` in the `sagaline` crate, which polls
+//! `Agent::run_stream` on the Tokio runtime via
+//! `sagaline_bridge::TokioBridge` and forwards each event
+//! through an mpsc channel to a gpui task that pushes onto this
+//! log). The UI reads them through the gpui global
+//! [`AgentEventLog`]. The [`render_activity`] function does the
+//! actual rendering.
 
 use gpui_base::v_flex;
 use gpui_kit::*;

@@ -18,11 +18,18 @@ path = "src/main.rs"
 [dependencies]
 sagaline-core = { path = "../sagaline-core" }
 sagaline-agent = { path = "../sagaline-agent" }
-sagaline-keys = { path = "../sagaline-keys" }
+sagaline-store = { path = "../sagaline-store" }
+sagaline-bridge = { path = "../sagaline-bridge" }
 sagaline-providers = { path = "../sagaline-providers" }
 sagaline-ui = { path = "../sagaline-ui" }
 gpui-kit = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

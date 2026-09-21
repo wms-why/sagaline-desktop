@@ -2,7 +2,7 @@
 //!
 //! Per-provider public config (base_url, default model). **No keys**
 //! live here — those are in `~/.sageline/data/keys.db` via
-//! [`sagaline_keys::KeyStore`].
+//! [`sagaline_store::repo::key::KeyRepo`].
 //!
 //! ## File shape
 //!
@@ -207,6 +207,6 @@ model = "y"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, toml).unwrap();
-        let err = ProviderConfigSet::load(&path).unwrap_err();
+        let _err = ProviderConfigSet::load(&path).unwrap_err();
 }
 }

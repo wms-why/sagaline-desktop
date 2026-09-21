@@ -13,10 +13,11 @@
 pub mod event;
 pub mod llm;
 pub mod loop_;
-pub mod prompt;
 pub mod tool;
 pub mod tools;
 pub use event::{AgentEvent, EventSink};
 pub use llm::{LlmClient, LlmError, PlanRequest, ReflectRequest, RigLlm};
-pub use loop_::{Agent, AgentConfig, StepOutcome};
-pub use tool::{Tool, ToolDescriptor, ToolError, ToolRegistry, ToolResult};
+pub use loop_::{Agent, AgentConfig, CommitPolicy, StepOutcome};
+pub use tool::{
+    Capability, Tool, ToolContext, ToolDescriptor, ToolError, ToolRegistry, ToolResult,
+};

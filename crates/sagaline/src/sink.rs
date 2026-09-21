@@ -1,12 +1,16 @@
 //! `EventSink` implementation that ferries agent events to a
 //! `tokio::sync::mpsc` channel.
 //!
-//! The agent loop is `async` and runs on a tokio task; the gpui UI
-//! is bound to a single-threaded executor. We bridge the two with a
-//! channel: the agent's [`ChannelSink`] pushes events; a separate
-//! `cx.spawn`-managed task drains the receiver and pushes onto the
-//! [`AgentEventLog`] global, calling `cx.notify()` so the workspace
-//! re-renders.
+//! The agent loop itself runs on the Tokio runtime via
+//! `sagaline_bridge::TokioBridge`; the gpui UI is bound to
+//! GPUI's own scheduler. We bridge the two with a channel:
+//! the agent's [`ChannelSink`] pushes events from the Tokio
+//! side, a separate `cx.spawn`-managed task drains the receiver
+//! on the GPUI side and pushes onto the [`AgentEventLog`]
+//! global, calling `refresh_windows()` so the workspace
+//! re-renders. The receiver is polled from a gpui task —
+//! `tokio::sync::mpsc` is fine with that, since it queues items
+//! internally and wakes the receiver's waker on send.
 
 use sagaline_agent::{AgentEvent, EventSink};
 use tokio::sync::mpsc;

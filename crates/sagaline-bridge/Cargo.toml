@@ -1,0 +1,19 @@
+[package]
+name = "sagaline-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Thin Tokio <-> GPUI bridge: spawn a Tokio future, await its result on a GPUI background task, cancel on drop."
+
+[dependencies]
+gpui-kit = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+# Test-only: gives us `platform::TestDispatcher` so we can build
+# a real `BackgroundExecutor` without booting a GPUI app.
+gpui-kit = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["rt", "time", "macros"] }

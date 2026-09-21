@@ -2,8 +2,8 @@
 //!
 //! Bridges the agent's tool-call layer to the providers' [`ImageGen`]
 //! trait. Holds an `Arc<ProviderRegistry>` + an `Arc<ProviderConfigSet>`
-//! + an `Arc<SagalineStore>` so the same triplet can be shared with
-//! other tools and the app shell.
+//! + an `Arc<sagaline_store::World>` so the same triplet can be
+//! shared with other tools and the app shell.
 //!
 //! ## Wire shape
 //!
@@ -40,10 +40,10 @@ use secrecy::ExposeSecret as _;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use sagaline_keys::{ProviderKeyId, SagalineStore};
 use sagaline_providers::{
     Capability, GenerationRequest, ProviderConfigSet, ProviderError, ProviderRegistry,
 };
+use sagaline_store::{ProviderKeyId, World};
 
 use sagaline_core::markdown::{split, SplitFile};
 
@@ -111,13 +111,13 @@ struct GenerateImageOutput {
 pub struct GenerateImageTool {
     registry: Arc<ProviderRegistry>,
     config: Arc<ProviderConfigSet>,
-    store: Arc<SagalineStore>,
+    store: Arc<World>,
 }
 impl GenerateImageTool {
     pub fn new(
         registry: Arc<ProviderRegistry>,
         config: Arc<ProviderConfigSet>,
-        store: Arc<SagalineStore>,
+        store: Arc<World>,
     ) -> Self {
         Self {
             registry,
@@ -135,20 +135,21 @@ impl Tool for GenerateImageTool {
             "Generate a single image from a prompt using the named provider's image backend. \
              Writes the bytes to `output_path` and returns `{path, bytes, mime, provider_job_id}`. \
              Use `provider` to pick the backend (e.g. \"minimax\", \"openai\"); `model` overrides \
-             the per-provider default; `aspect_ratio` is honoured by providers that support it. \
-             If `shot_path` is supplied, the parent shot's front matter is updated with \
-             `assets.keyframe` and `status: succeeded` so the agent's chain-of-thought has a \
-             durable record of which shot owns the asset.",
+             the per-provider default; `aspect_ratio` is honoured by providers that support it.",
+            crate::tool::Capability::Execute,
         )
     }
 
-    async fn execute(&self, args: Value) -> Result<ToolResult, ToolError> {
-        let parsed: GenerateImageArgs = serde_json::from_value(args).map_err(|e| {
-            ToolError::BadArgs {
+    async fn execute(
+        &self,
+        _ctx: crate::tool::ToolContext,
+        args: Value,
+    ) -> Result<ToolResult, ToolError> {
+        let parsed: GenerateImageArgs =
+            serde_json::from_value(args).map_err(|e| ToolError::BadArgs {
                 name: "generate_image".into(),
                 message: e.to_string(),
-            }
-        })?;
+            })?;
 
         self.run(parsed).await
     }
@@ -185,10 +186,14 @@ impl GenerateImageTool {
             name: "generate_image".into(),
             source: Box::new(e),
         })?;
-        let key = self.store.keys().get(&key_id).map_err(|e| ToolError::Execution {
-            name: "generate_image".into(),
-            source: Box::new(e),
-        })?;
+        let key = self
+            .store
+            .keys()
+            .get(&key_id)
+            .map_err(|e| ToolError::Execution {
+                name: "generate_image".into(),
+                source: Box::new(e),
+            })?;
 
         // 4. Build the request. The api_key flows through `extra` —
         //    the bridge passes it through to the backend's HTTP
@@ -208,19 +213,24 @@ impl GenerateImageTool {
         };
 
         // 5. Invoke via the ImageGen trait.
-        let out = backend.generate(req).await.map_err(|e| ToolError::Execution {
-            name: "generate_image".into(),
-            source: Box::new(e),
-        })?;
+        let out = backend
+            .generate(req)
+            .await
+            .map_err(|e| ToolError::Execution {
+                name: "generate_image".into(),
+                source: Box::new(e),
+            })?;
 
         // 6. Write the bytes.
         if let Some(parent) = args.output_path.parent() {
             if !parent.as_os_str().is_empty() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| ToolError::Io {
-                    name: "generate_image".into(),
-                    path: parent.to_path_buf(),
-                    source: e,
-                })?;
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| ToolError::Io {
+                        name: "generate_image".into(),
+                        path: parent.to_path_buf(),
+                        source: e,
+                    })?;
             }
         }
         tokio::fs::write(&args.output_path, &out.bytes)
@@ -267,12 +277,8 @@ impl GenerateImageTool {
     ) -> Result<(), String> {
         // Walk up to find `story.md` so we can record the
         // keyframe path relative to the story root.
-        let story_root = find_story_root(shot_path).ok_or_else(|| {
-            format!(
-                "could not locate story root from {}",
-                shot_path.display()
-            )
-        })?;
+        let story_root = find_story_root(shot_path)
+            .ok_or_else(|| format!("could not locate story root from {}", shot_path.display()))?;
 
         let relative = image_path
             .strip_prefix(&story_root)
@@ -294,9 +300,7 @@ impl GenerateImageTool {
         if !frontmatter.is_mapping() {
             return Err("shot front matter is not a mapping".into());
         }
-        let mapping = frontmatter
-            .as_mapping_mut()
-            .expect("checked is_mapping");
+        let mapping = frontmatter.as_mapping_mut().expect("checked is_mapping");
         mapping.insert(
             serde_yaml::Value::String("status".into()),
             serde_yaml::Value::String("succeeded".into()),

@@ -53,9 +53,9 @@ pub enum ProviderError {
     #[error(transparent)]
     ProviderConfig(#[from] crate::ProviderConfigError),
 
-    /// Key lookup failure. Wrapped [`sagaline_keys::KeyError`].
+    /// Key lookup failure. Wrapped [`sagaline_store::StoreError`].
     #[error(transparent)]
-    Key(#[from] sagaline_keys::KeyError),
+    Key(#[from] sagaline_store::StoreError),
 
     /// Anything else.
     #[error("provider error: {0}")]

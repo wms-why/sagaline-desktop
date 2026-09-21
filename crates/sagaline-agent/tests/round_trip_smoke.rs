@@ -70,15 +70,15 @@ async fn shot_front_matter_gets_status_and_keyframe_after_round_trip() {
     // Build the GenerateImageTool — needs a registry / config /
     // store, but the round-trip helper does not touch any of
     // them, so we can pass empty Arcs.
-    use sagaline_providers::ProviderRegistry;
     use sagaline_providers::ProviderConfigSet;
-    use sagaline_keys::SagalineStore;
+    use sagaline_providers::ProviderRegistry;
+    use sagaline_store::World;
 
     // Open a real store in the same temp dir; the round-trip
     // helper ignores it.
     let store_dir = story_root.join("sagaline-data");
     fs::create_dir_all(&store_dir).unwrap();
-    let store = SagalineStore::open(&store_dir).unwrap();
+    let store = World::open_at(&store_dir.join("world.db")).unwrap();
 
     let tool = sagaline_agent::tools::GenerateImageTool::new(
         std::sync::Arc::new(ProviderRegistry::new()),
@@ -111,10 +111,7 @@ async fn shot_front_matter_gets_status_and_keyframe_after_round_trip() {
             .entry(serde_yaml::Value::String("assets".into()))
             .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
         let assets_map = assets.as_mapping_mut().unwrap();
-        let relative = image_path
-            .strip_prefix(&story_root)
-            .unwrap()
-            .to_path_buf();
+        let relative = image_path.strip_prefix(&story_root).unwrap().to_path_buf();
         assets_map.insert(
             serde_yaml::Value::String("keyframe".into()),
             serde_yaml::Value::String(relative.to_string_lossy().into_owned()),
@@ -156,5 +153,8 @@ fn args_round_trip_via_serde() {
     let json = serde_json::to_value(&args).expect("serialize");
     assert_eq!(json["provider"], "minimax");
     assert_eq!(json["prompt"], "a chair");
-    assert_eq!(json["shot_path"].as_str(), Some(shot_path.to_string_lossy().as_ref()));
+    assert_eq!(
+        json["shot_path"].as_str(),
+        Some(shot_path.to_string_lossy().as_ref())
+    );
 }

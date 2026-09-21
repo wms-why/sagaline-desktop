@@ -13,7 +13,7 @@ use rig_core::client::CompletionClient;
 use rig_core::completion::{AssistantContent, CompletionModel, Message};
 use rig_core::providers::openai;
 use rig_core::providers::openai::completion::GenericCompletionModel;
-use sagaline_keys::KeyHandle;
+use sagaline_store::KeyHandle;
 use secrecy::ExposeSecret as _;
 use serde_json::json;
 use std::sync::Arc;

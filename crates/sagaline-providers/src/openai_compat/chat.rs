@@ -3,7 +3,7 @@
 //! Replaces the hand-rolled `OpenAiCompatChat` that lived here
 //! before rig-core was adopted. The only sagaline-owned logic left
 //! is keying: we never read the API key from the environment —
-//! every call takes a `&sagaline_keys::KeyHandle` and feeds the
+//! every call takes a `&sagaline_store::KeyHandle` and feeds the
 //! secret straight into rig's bearer-auth slot.
 //!
 //! Wire details (POST shape, error mapping, retry, streaming) are
@@ -31,7 +31,7 @@ use rig_core::providers::openai::completion::GenericCompletionModel;
 use secrecy::ExposeSecret as _;
 use std::sync::Arc;
 
-use sagaline_keys::KeyHandle;
+use sagaline_store::KeyHandle;
 
 /// The single concrete chat-backend type used by sagaline. All
 /// OpenAI-compatible providers share it; the rig `Completions`
@@ -101,7 +101,7 @@ pub fn build_chat_with_default(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sagaline_keys::KeyHandle;
+    use sagaline_store::KeyHandle;
 
     #[test]
     fn empty_base_url_is_rejected() {

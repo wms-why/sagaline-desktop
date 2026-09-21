@@ -17,8 +17,17 @@ pub enum CoreError {
     #[error("story path is not a directory: {0}")]
     StoryPathNotDir(PathBuf),
 
+    #[error("target story directory already exists: {0}")]
+    StoryDirExists(PathBuf),
+
     #[error("story directory is missing story.md: {0}")]
     MissingStoryFile(PathBuf),
+
+    #[error("invalid slug `{slug}`: {reason}")]
+    InvalidSlug {
+        slug: String,
+        reason: &'static str,
+    },
 
     #[error("failed to read {path}: {source}")]
     ReadFile {

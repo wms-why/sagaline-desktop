@@ -70,9 +70,11 @@ impl ResolvedContext {
     }
 }
 
-/// Anything that can receive agent events. The default implementation is
-/// `VecCollector`; the future gpui implementation will forward events
-/// to a UI channel.
+/// Anything that can receive agent events. The default
+/// implementation is `VecCollector`. The bridge-using gpui code
+/// path goes through [`Agent::run_stream`] instead, which
+/// returns a `Stream<Item = AgentEvent>` — that side doesn't
+/// need a sink at all.
 pub trait EventSink {
     fn emit(&mut self, event: AgentEvent);
 }
