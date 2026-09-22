@@ -3,23 +3,26 @@
 //!
 //! Reproduces the bug class the user reported: "click Create, nothing
 //! happens". The previous failure mode was that the dialog closed
-//! before the user could see what went wrong (or didn't show errors
-//! at all). These tests exercise the actual code path the click
-//! handler drives:
+//! before the user could see what went wrong (or didn't
+//! show errors at all). These tests exercise the actual code
+//! path the click handler drives:
 //!
-//! 1. `AppEnvStoryService::create_story` returns Ok on a well-formed
-//!    title and writes the new story on disk.
-//! 2. `create_story` returns a meaningful error on an empty title
-//!    (so the dialog can surface it instead of silently closing).
+//! 1. `AppEnvStoryService::create_story` returns Ok on a
+//!    well-formed title and writes the new story on disk.
+//! 2. `create_story` returns a meaningful error on an empty
+//!    title (so the dialog can surface it instead of silently
+//!    closing).
 //! 3. `create_story` returns a meaningful error when no project
 //!    location has been set yet.
 //! 4. `set_project_location` followed by `create_story` is the
 //!    happy path the user actually hits.
 //!
-//! Uses `SAGALINE_DATA_DIR` to redirect `AppEnv::open` at a
-//! `tempfile::TempDir`, and a separate `tempfile::TempDir` for the
-//! project location. This is the exact same plumbing the desktop
-//! binary uses — no mocks.
+//! Uses `AppEnv::open_at_with_home(data_dir, None)` to skip the
+//! default-project-location adoption that production users get
+//! automatically — these tests are not exercising that behavior, and
+//! letting it run would touch the developer's real home directory
+//! on every `cargo test`. The one test that DOES exercise the
+//! default adoption passes `Some(fake_home.path())` instead.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,15 +33,13 @@ use sagaline_ui::StoryService;
 #[test]
 fn create_story_fails_when_no_project_location_is_set() {
     let data_dir = tempfile::tempdir().expect("data dir");
-    // SAFETY: this test sets a process-wide env var that other
-    // tests in the same binary may observe. Run in this serial
-    // test file with no concurrent `AppEnv::open` calls.
-    // SAFETY:
-    // `set_var` is `unsafe` from Rust 2024 onward; pin to a
-    // single-threaded scoped env so we don't leak the override
-    // to other tests.
-    std::env::set_var("SAGALINE_DATA_DIR", data_dir.path());
-    let env = Arc::new(AppEnv::open().expect("env open"));
+    // `home = None` skips the default-project-location adoption
+    // (see `load_or_adopt_default_prefs`), so this assertion
+    // continues to test the "no location → create fails" failure
+    // path.
+    let env = Arc::new(
+        AppEnv::open_at_with_home(data_dir.path().to_path_buf(), None).expect("env open"),
+    );
 
     let svc = sagaline::AppEnvStoryService::new(env.clone());
     assert!(
@@ -53,17 +54,57 @@ fn create_story_fails_when_no_project_location_is_set() {
         err.contains("project location"),
         "error must mention project location, got: {err}"
     );
+}
 
-    std::env::remove_var("SAGALINE_DATA_DIR");
+#[test]
+fn open_adopts_default_project_location_when_prefs_empty() {
+    // Simulate a first-run user: empty data dir, real-looking home.
+    // The app must adopt `<home>/Documents/Sagaline Projects`,
+    // create it on disk, and re-emit it on subsequent launches
+    // (i.e. it must persist to prefs.toml).
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let fake_home = tempfile::tempdir().expect("fake home");
+
+    let env1 = AppEnv::open_at_with_home(
+        data_dir.path().to_path_buf(),
+        Some(fake_home.path()),
+    )
+    .expect("env open");
+    let loc = env1
+        .story_location()
+        .expect("default project location must be set");
+    let expected = fake_home.path().join("Documents").join("Sagaline Projects");
+    assert_eq!(
+        loc.path(),
+        expected,
+        "adopted location must be <home>/Documents/Sagaline Projects"
+    );
+    assert!(
+        loc.path().is_dir(),
+        "default location directory must exist on disk: {}",
+        loc.path().display()
+    );
+
+    // Subsequent open must read the persisted prefs (no re-derive).
+    let env2 = AppEnv::open_at_with_home(
+        data_dir.path().to_path_buf(),
+        Some(fake_home.path()),
+    )
+    .expect("env re-open");
+    let loc2 = env2
+        .story_location()
+        .expect("project location must persist across opens");
+    assert_eq!(loc2.path(), loc.path());
 }
 
 #[test]
 fn create_story_writes_story_on_disk_when_location_is_set() {
     let data_dir = tempfile::tempdir().expect("data dir");
     let project_dir = tempfile::tempdir().expect("project dir");
-    std::env::set_var("SAGALINE_DATA_DIR", data_dir.path());
 
-    let env = Arc::new(AppEnv::open().expect("env open"));
+    let env = Arc::new(
+        AppEnv::open_at_with_home(data_dir.path().to_path_buf(), None).expect("env open"),
+    );
     let svc = sagaline::AppEnvStoryService::new(env.clone());
 
     // Wire up the project location exactly as the Settings modal
@@ -97,17 +138,16 @@ fn create_story_writes_story_on_disk_when_location_is_set() {
     let recent = svc.recent_stories();
     assert_eq!(recent.len(), 1, "expected one story in recent list");
     assert_eq!(recent[0].title, "Hollow Star");
-
-    std::env::remove_var("SAGALINE_DATA_DIR");
 }
 
 #[test]
 fn create_story_reports_empty_title_error() {
     let data_dir = tempfile::tempdir().expect("data dir");
     let project_dir = tempfile::tempdir().expect("project dir");
-    std::env::set_var("SAGALINE_DATA_DIR", data_dir.path());
 
-    let env = Arc::new(AppEnv::open().expect("env open"));
+    let env = Arc::new(
+        AppEnv::open_at_with_home(data_dir.path().to_path_buf(), None).expect("env open"),
+    );
     let svc = sagaline::AppEnvStoryService::new(env.clone());
     svc.set_project_location(PathBuf::from(project_dir.path()))
         .expect("set project location");
@@ -121,8 +161,6 @@ fn create_story_reports_empty_title_error() {
         err.to_lowercase().contains("empty") || err.to_lowercase().contains("slug"),
         "expected a user-facing empty-title error, got: {err}"
     );
-
-    std::env::remove_var("SAGALINE_DATA_DIR");
 }
 
 #[test]
@@ -133,9 +171,10 @@ fn create_story_creates_distinct_handles_for_duplicate_titles() {
     // first one twice.
     let data_dir = tempfile::tempdir().expect("data dir");
     let project_dir = tempfile::tempdir().expect("project dir");
-    std::env::set_var("SAGALINE_DATA_DIR", data_dir.path());
 
-    let env = Arc::new(AppEnv::open().expect("env open"));
+    let env = Arc::new(
+        AppEnv::open_at_with_home(data_dir.path().to_path_buf(), None).expect("env open"),
+    );
     let svc = sagaline::AppEnvStoryService::new(env.clone());
     svc.set_project_location(PathBuf::from(project_dir.path()))
         .expect("set project location");
@@ -149,6 +188,4 @@ fn create_story_creates_distinct_handles_for_duplicate_titles() {
     );
     let recent = svc.recent_stories();
     assert_eq!(recent.len(), 2, "both stories should appear in recent list");
-
-    std::env::remove_var("SAGALINE_DATA_DIR");
 }

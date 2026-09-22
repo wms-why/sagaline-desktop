@@ -32,7 +32,7 @@ use sagaline_core::{FileStoryStore, ProjectLocation, StoryStore};
 use sagaline_store::World;
 use sagaline_providers::{ProviderConfigError, ProviderConfigSet, ProviderRegistry};
 
-use crate::prefs::{Prefs, PrefsError};
+use crate::prefs::{user_home, Prefs, PrefsError};
 
 /// `~/.sageline/data/` — the per-user store directory.
 ///
@@ -104,6 +104,33 @@ impl AppEnv {
 
     /// Like [`Self::open`] but at an explicit data directory.
     pub fn open_at(data_dir: PathBuf) -> Result<Self, EnvError> {
+        Self::open_with(data_dir, user_home())
+    }
+
+    /// Like [`Self::open_at`] but with an explicit home directory
+    /// for the default-project-location fallback. Tests use this
+    /// to:
+    /// - control which path gets adopted (`Some(fake_home)` →
+    ///   `<fake_home>/Documents/Sagaline Projects` lands on disk),
+    /// - skip the adoption entirely (`None` → `project_location`
+    ///   stays unset, so the existing "no project location →
+    ///   create fails" failure path keeps working).
+    ///
+    /// Production code should keep using [`Self::open`] or
+    /// [`Self::open_at`], which thread
+    /// [`prefs::user_home()`] (read from `$HOME` / `%USERPROFILE%`)
+    /// through. Passing `None` here also covers the rare
+    /// "no home env var" production case (CI sandboxes) — the
+    /// user still gets a usable app, they just have to pick a
+    /// project location via ⌘ , like before.
+    pub fn open_at_with_home(
+        data_dir: PathBuf,
+        home: Option<&Path>,
+    ) -> Result<Self, EnvError> {
+        Self::open_with(data_dir, home.map(Path::to_path_buf))
+    }
+
+    fn open_with(data_dir: PathBuf, home: Option<PathBuf>) -> Result<Self, EnvError> {
         let store = World::open(&data_dir)?;
         let config = match ProviderConfigSet::load(&data_dir.join("config.toml")) {
             Ok(c) => Arc::new(c),
@@ -117,7 +144,7 @@ impl AppEnv {
             Err(e) => return Err(e.into()),
         };
         let registry = Arc::new(ProviderRegistry::new());
-        let prefs = Prefs::load(&data_dir)?;
+        let prefs = load_or_adopt_default_prefs(&data_dir, home.as_deref())?;
         let story_store = build_story_store(prefs.project_location.clone());
         // The agent's tool calls go through this runtime; multi-thread
         // so parallel LLM / image / file I/O don't serialize on a
@@ -414,4 +441,49 @@ fn parse_commit_policy_env() -> CommitPolicy {
         }
         None => CommitPolicy::Auto,
     }
+}
+
+/// Load the user's [`Prefs`] and, if no project location has been
+/// picked yet, adopt the default (`<home>/Documents/Sagaline
+/// Projects` — created if absent) and persist it. This removes
+/// the "must open ⌘ , before ⌘ N works" friction for first-run
+/// users; the user can still override the default later via the
+/// project-settings modal (`AppEnv::set_project_location`),
+/// which writes through to `prefs.toml`.
+///
+/// `home_override` is the home directory to use when adopting the
+/// default:
+/// - `Some(home)` → adopt `<home>/Documents/Sagaline Projects`.
+/// - `None` → leave `project_location` unset (user must pick one
+///   via ⌘ ,). Tests use this to keep the
+///   "fresh env has no project location" failure path under test
+///   without racing on process env vars.
+///
+/// [`AppEnv::open`] and [`AppEnv::open_at`] thread
+/// [`prefs::user_home()`] (which reads `$HOME` / `%USERPROFILE%`)
+/// through here in production.
+fn load_or_adopt_default_prefs(
+    data_dir: &Path,
+    home_override: Option<&Path>,
+) -> Result<Prefs, PrefsError> {
+    let mut prefs = Prefs::load(data_dir)?;
+    if prefs.project_location.is_some() {
+        return Ok(prefs);
+    }
+    let Some(home) = home_override else {
+        warn!("no home directory; user must pick a project location via ⌘ ,");
+        return Ok(prefs);
+    };
+    match crate::prefs::default_project_location(home) {
+        Ok(default_loc) => {
+            prefs.project_location = Some(default_loc);
+            if let Err(e) = prefs.save(data_dir) {
+                warn!(error = %e, "could not persist default project location to prefs.toml");
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to create default project location");
+        }
+    }
+    Ok(prefs)
 }

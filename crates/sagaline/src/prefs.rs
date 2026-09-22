@@ -102,3 +102,56 @@ impl Prefs {
         Ok(())
     }
 }
+
+/// Resolve the user's home directory from `$HOME` (Unix) or
+/// `%USERPROFILE%` (Windows). `None` if neither is set (rare —
+/// only seen in stripped-down CI sandboxes with no user env).
+pub fn user_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+/// Default project location for first-run users who haven't picked
+/// one yet: `<home>/Documents/Sagaline Projects`. Creates the
+/// directory (and any missing parents) so the very first
+/// `FileStoryStore::create` call lands on disk without an extra
+/// step from the user. The user can still override via
+/// ⌘ , Project settings, which writes to `prefs.toml` and
+/// shadows this default on subsequent launches.
+///
+/// Takes the home directory explicitly so the function is
+/// testable without mutating process env vars.
+pub fn default_project_location(home: &Path) -> Result<ProjectLocation, PrefsError> {
+    let path = home.join("Documents").join("Sagaline Projects");
+    std::fs::create_dir_all(&path).map_err(|source| PrefsError::Write {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(ProjectLocation::new(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_project_location_creates_directory_under_home() {
+        let home = tempfile::tempdir().expect("home");
+        let loc = default_project_location(home.path()).expect("default loc");
+        assert_eq!(
+            loc.path(),
+            home.path().join("Documents").join("Sagaline Projects")
+        );
+        assert!(loc.path().is_dir(), "must create directory");
+    }
+
+    #[test]
+    fn default_project_location_is_idempotent() {
+        let home = tempfile::tempdir().expect("home");
+        let loc1 = default_project_location(home.path()).expect("first");
+        let loc2 = default_project_location(home.path()).expect("second");
+        assert_eq!(loc1.path(), loc2.path());
+        assert!(loc1.path().is_dir());
+    }
+}
