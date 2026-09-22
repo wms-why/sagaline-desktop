@@ -133,6 +133,13 @@ pub struct WorkspaceView {
     add_key_id_input: Option<Entity<InputState>>,
     add_secret_input: Option<Entity<InputState>>,
     add_key_error: Option<String>,
+    /// Surface for [`DeleteProviderKey`] handler failures. Lives
+    /// outside the add-key form because the user usually closes
+    /// that form before clicking Delete on a stored row — and a
+    /// silent failure otherwise leaves them wondering whether the
+    /// delete took effect. Cleared on the next successful delete
+    /// and on any new attempt.
+    delete_key_error: Option<String>,
 }
 
 impl EventEmitter<StoryOpened> for WorkspaceView {}
@@ -154,6 +161,7 @@ impl WorkspaceView {
             add_key_id_input: None,
             add_secret_input: None,
             add_key_error: None,
+            delete_key_error: None,
         }
     }
 
@@ -174,6 +182,7 @@ impl WorkspaceView {
             add_key_id_input: None,
             add_secret_input: None,
             add_key_error: None,
+            delete_key_error: None,
         }
     }
 
@@ -317,6 +326,20 @@ impl WorkspaceView {
 
     pub fn add_key_error_msg(&self) -> Option<&str> {
         self.add_key_error.as_deref()
+    }
+
+    /// Surface a delete failure under the BYOK key list. Cleared on
+    /// the next successful delete; not cleared by closing the
+    /// add-key form (the two error surfaces are independent).
+    pub fn set_delete_key_error(&mut self, msg: Option<String>, cx: &mut Context<Self>) {
+        if self.delete_key_error != msg {
+            self.delete_key_error = msg;
+            cx.notify();
+        }
+    }
+
+    pub fn delete_key_error_msg(&self) -> Option<&str> {
+        self.delete_key_error.as_deref()
     }
 
     pub fn show_add_key_form(&self) -> bool {

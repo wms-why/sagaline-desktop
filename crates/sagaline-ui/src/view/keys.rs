@@ -71,26 +71,24 @@ pub(super) fn render_keys_panel(view: &gpui_kit::Entity<WorkspaceView>, cx: &gpu
     let store = if cx.has_global::<KeyStoreSlot>() {
         cx.global::<KeyStoreSlot>().0.clone()
     } else {
-        return col.child(
-            div()
-                .text_xs()
-                .child("Key store not installed (binary mode)."),
-        );
+        return col.child(div().text_xs().child("Key store not installed (binary mode)."));
     };
 
     let ids = match store.keys().list_ids() {
         Ok(ids) => ids,
         Err(e) => {
             return col.child(
-                div()
-                    .text_xs()
-                    .child(format!("failed to list keys: {e}")),
+                render_delete_error_footer(view, cx)
+                    .unwrap_or_else(|| div().text_xs().child(format!("failed to list keys: {e}"))),
             );
         }
     };
 
     if ids.is_empty() {
         col = col.child(div().text_xs().child("No keys stored yet."));
+        if let Some(err) = render_delete_error_footer(view, cx) {
+            col = col.child(err);
+        }
         return col;
     }
 
@@ -118,7 +116,24 @@ pub(super) fn render_keys_panel(view: &gpui_kit::Entity<WorkspaceView>, cx: &gpu
         col = col.child(row);
     }
 
+    if let Some(err) = render_delete_error_footer(view, cx) {
+        col = col.child(err);
+    }
     col
+}
+
+/// Render the BYOK delete-failure footer as a single-row, danger-
+/// coloured message. Returns `None` when there is no pending delete
+/// error so the caller can omit the row entirely from the column.
+/// Lives outside the add-key form (which has its own error surface)
+/// because the user usually closes that form before clicking Delete
+/// on a stored row.
+fn render_delete_error_footer(
+    view: &gpui_kit::Entity<WorkspaceView>,
+    cx: &gpui_kit::App,
+) -> Option<gpui_kit::Div> {
+    let msg = view.read(cx).delete_key_error_msg()?.to_string();
+    Some(div().text_xs().text_color(cx.theme().danger).child(msg))
 }
 
 /// Render the paste-plaintext add-key form. The three `InputState`
@@ -322,4 +337,20 @@ pub(super) fn validate_add_key(provider: &str, key_id: &str, plaintext: &str) ->
     sagaline_store::ProviderKeyId::new(provider, key_id)
         .map_err(|e| format!("invalid id: {e}"))?;
     Ok(())
+}
+
+/// Map a [`sagaline_store::StoreError`] from a delete attempt to
+/// the user-facing footer message rendered under the BYOK key list.
+/// Kept pure so the message wording is testable without a gpui
+/// runtime; the handler passes the result through directly.
+pub(super) fn format_delete_error(e: &sagaline_store::StoreError) -> String {
+    use sagaline_store::StoreError;
+    match e {
+        StoreError::NotFound { .. } => "key not found — already deleted?".into(),
+        StoreError::EncryptDecrypt(_) => {
+            "delete failed: stored key cannot be decrypted — the data dir may be corrupted".into()
+        }
+        StoreError::Other(_) => format!("delete failed: {e}"),
+        _ => format!("delete failed: {e}"),
+    }
 }

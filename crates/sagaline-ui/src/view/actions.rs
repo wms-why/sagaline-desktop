@@ -79,6 +79,12 @@ pub fn register_actions(view: gpui_kit::Entity<WorkspaceView>, cx: &mut gpui_kit
     let view_for_delete = view.clone();
     cx.on_action::<DeleteProviderKey>(move |action, cx| {
         let Some(store) = cx.try_global::<KeyStoreSlot>().map(|s| s.0.clone()) else {
+            // Surface the missing-store condition the same way a
+            // delete failure surfaces — otherwise the user clicks
+            // Delete and sees the row stick with no explanation.
+            let _ = view_for_delete.update(cx, |v, cx| {
+                v.set_delete_key_error(Some("Key store not available".into()), cx);
+            });
             return;
         };
         let provider = action.provider.clone();
@@ -89,10 +95,17 @@ pub fn register_actions(view: gpui_kit::Entity<WorkspaceView>, cx: &mut gpui_kit
                 Ok(id) => store.keys().delete(&id).map(|_| ()),
                 Err(e) => Err(sagaline_store::StoreError::Other(e.to_string())),
             };
-            if let Err(e) = result {
-                tracing::warn!(error = %e, "delete provider key failed");
-            }
-            let _ = view_for_refresh.update(cx, |_view, cx| cx.notify());
+            let err_msg = match result {
+                Ok(()) => None,
+                Err(e) => {
+                    tracing::warn!(error = %e, "delete provider key failed");
+                    Some(crate::view::keys::format_delete_error(&e))
+                }
+            };
+            let _ = view_for_refresh.update(cx, |v, cx| {
+                v.set_delete_key_error(err_msg, cx);
+                cx.notify();
+            });
         })
         .detach();
     });
