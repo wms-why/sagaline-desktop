@@ -447,10 +447,15 @@ smoke is:
   `AppEnv::build_agent` wires `RigLlm` automatically whenever a chat
   provider + key are configured in `~/.sageline/data/`. Without that
   pair the loop runs the deterministic scaffold (used by tests and
-  headless runs). `crates/sagaline-providers/` ships two image
-  backends: a native `minimax` adapter and the OpenAI
-  `gpt-image-1` adapter registered under the `openai` key, so
-  `registry.pick_image("openai")` now routes correctly.
+  headless runs). `crates/sagaline-providers/` ships three
+  capability surfaces through minimax: a native `minimax`
+  image adapter and the OpenAI `gpt-image-1` adapter registered
+  under the `openai` key, a native `MinimaxTts` adapter, and a
+  native `MinimaxVideo` (image-to-video) adapter. The registry
+  exposes typed `pick_image`, `pick_tts`, `pick_image_to_video`
+  accessors; routing from `config.toml` + key store to a
+  pre-registered backend is the app-shell's responsibility
+  (Phase-5 follow-up).
 - `sagaline_agent::tools::generate_image` already patches the parent
   shot's front matter with `assets.keyframe` (path relative to the
   enclosing story root) and `status: succeeded` when `shot_path` is
@@ -665,10 +670,7 @@ Phase 2.5 ships:
 
 ### Smaller items
 
-1. **Tts + ImageToVideo backends** — `Tts` and `ImageToVideo`
-   traits are defined but no provider has implemented them yet.
-   The registry can route calls as soon as one does.
-2. **Hosted project sync** — when `../homeweb/` ships the
+1. **Hosted project sync** — when `../homeweb/` ships the
    project-sync endpoint, add an opt-in client. This is the
    only piece of this project that talks to `homeweb/`, and it
    must stay opt-in (the open source pipeline must work without
