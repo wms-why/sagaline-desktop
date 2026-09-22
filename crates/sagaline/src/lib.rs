@@ -13,7 +13,7 @@ pub mod env;
 pub mod prefs;
 pub mod service;
 
-pub use env::{AppEnv, EnvError};
+pub use env::{default_data_dir, AppEnv, EnvError};
 pub use service::AppEnvStoryService;
 pub type AppEnvSlot = sagaline_ui::EnvSlot<AppEnv>;
 

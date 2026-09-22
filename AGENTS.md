@@ -480,12 +480,11 @@ smoke is:
   before merging. Any new entity field the user sees goes
   through `sagaline_core::render::render_preview_lines`, not
   through `serde_yaml::to_string(&entity.frontmatter)`.
-- `tracing` is initialized nowhere in `client/`. Every
-  `tracing::{info!, warn!, error!}` call in `install_env`,
-  `run_agent`, and the agent loop is silently dropped. Startup or
-  agent-run failures produce zero output. Fixing this needs a new
-  `tracing-subscriber` dep (pending approval under the external-
-  deps gate).
+- `tracing` is initialized in `crates/sagaline/src/main.rs` via
+  a `tracing-subscriber` registry with two layers — stderr (ANSI
+  on) and `<data_dir>/sagaline.log` (ANSI off, append). Both are
+  gated by `RUST_LOG`; default level is `warn`. `try_init()`
+  makes the boot idempotent.
 - `Cargo.lock` is gitignored (intentional for a binary; keep it
   that way).
 - `crates/sagaline/src/sink.rs` is dead code — the
@@ -693,10 +692,7 @@ Phase 2.5 ships:
    only piece of this project that talks to `homeweb/`, and it
    must stay opt-in (the open source pipeline must work without
    it).
-5. **Initialize `tracing-subscriber` in `main.rs`** — gated on
-   approval of `tracing-subscriber` as a new external dep. Until
-   then, every `info!`/`warn!`/`error!` from `install_env`,
-6. **Default project location on first run** — today the new-
+5. **Default project location on first run** — today the new-
    story dialog is disabled until the user picks a location
    in Project Settings (⌘ ,). The "one-click use a sensible
    default" flow (e.g. `$HOME/Documents/Sagaline Projects`,
@@ -809,6 +805,19 @@ the SQLite-world-state pivot):
   `["std", "clock", "serde"]` — timestamps. Approved 2026-09-18
   (replaces an inline stdlib date-math implementation that
   turned out to be too brittle to maintain).
+
+Approved 2026-09-22 (this turn):
+
+- `tracing-subscriber` v0.3 with feature `env-filter` — the
+  subscriber used to install the global tracing handler in
+  `crates/sagaline/src/main.rs`. MIT licensed. Chosen over
+  alternatives (`fern`, `log` + `env_logger`) because it is the
+  official companion crate to `tracing` and already in the same
+  workspace family as the `tracing = "0.1"` we use throughout.
+  Two layers: stderr (ANSI on) for interactive runs, append to
+  `<data_dir>/sagaline.log` (ANSI off) for post-mortem. Both
+  gated by `RUST_LOG`; default level `warn`. `try_init()` keeps
+  the boot idempotent.
 
 On legacy `keys.db` (2026-09-18): the previous redb file at
 `~/.sageline/data/keys.db` is intentionally NOT migrated into
