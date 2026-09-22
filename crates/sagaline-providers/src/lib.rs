@@ -43,6 +43,7 @@ pub mod error;
 pub mod image_gen;
 pub mod image_to_video;
 pub mod minimax;
+pub mod openai;
 pub mod openai_compat;
 pub mod registry;
 pub mod tts;
