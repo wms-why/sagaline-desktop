@@ -83,4 +83,37 @@ impl Tool for CreateShotTool {
         let _ = ctx;
         domain::to_result(&CreateShotOutput { shot_id: id })
     }
+
+    fn supports_in_tx(&self) -> bool {
+        true
+    }
+
+    fn execute_in_tx(
+        &self,
+        _ctx: &ToolContext,
+        tx: &rusqlite::Transaction<'_>,
+        args: Value,
+    ) -> Result<ToolResult, ToolError> {
+        let parsed: CreateShotArgs = domain::parse_args("create_shot", args)?;
+        let id = uuid::Uuid::now_v7().to_string();
+        let now = sagaline_store::time_util::now_iso();
+        tx.execute(
+            "INSERT INTO shots
+                (id, scene_id, slug, ordinal, title, duration_sec, prompt,
+                 created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+            rusqlite::params![
+                id,
+                parsed.scene_id,
+                parsed.slug,
+                parsed.ordinal,
+                parsed.title,
+                parsed.duration_sec,
+                parsed.prompt,
+                now,
+            ],
+        )
+        .map_err(|e| domain::map_store_err("create_shot", e))?;
+        domain::to_result(&CreateShotOutput { shot_id: id })
+    }
 }

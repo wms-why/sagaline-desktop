@@ -190,6 +190,56 @@ impl Tool for UpdateCharacterTool {
         let _ = ctx;
         domain::to_result(&UpdateCharacterOutput { character: row })
     }
+
+    fn supports_in_tx(&self) -> bool {
+        true
+    }
+
+    fn execute_in_tx(
+        &self,
+        _ctx: &ToolContext,
+        tx: &rusqlite::Transaction<'_>,
+        args: Value,
+    ) -> Result<ToolResult, ToolError> {
+        let parsed: UpdateCharacterArgs = domain::parse_args("update_character", args)?;
+        let mut row: CharacterRow = tx
+            .query_row(
+                "SELECT id, story_id, slug, name, occupation, bio, created_at, updated_at \
+                 FROM characters WHERE id = ?1",
+                [&parsed.character_id],
+                |r| {
+                    Ok(CharacterRow {
+                        id: r.get("id")?,
+                        story_id: r.get("story_id")?,
+                        slug: r.get("slug")?,
+                        name: r.get("name")?,
+                        occupation: r.get("occupation")?,
+                        bio: r.get("bio")?,
+                        created_at: r.get("created_at")?,
+                        updated_at: r.get("updated_at")?,
+                    })
+                },
+            )
+            .map_err(|e| domain::map_store_err("update_character", e))?;
+        if let Some(name) = parsed.name {
+            row.name = name;
+        }
+        if let Some(occ) = parsed.occupation {
+            row.occupation = Some(occ);
+        }
+        if let Some(bio) = parsed.bio {
+            row.bio = bio;
+        }
+        let now = sagaline_store::time_util::now_iso();
+        tx.execute(
+            "UPDATE characters SET name = ?1, occupation = ?2, bio = ?3, updated_at = ?4 \
+             WHERE id = ?5",
+            rusqlite::params![row.name, row.occupation, row.bio, now, parsed.character_id],
+        )
+        .map_err(|e| domain::map_store_err("update_character", e))?;
+        row.updated_at = now;
+        domain::to_result(&UpdateCharacterOutput { character: row })
+    }
 }
 
 // ---- add_character_age ----------------------------------------------------
@@ -244,6 +294,28 @@ impl Tool for AddCharacterAgeTool {
         )
         .map_err(|e| domain::map_store_err("add_character_age", e))?;
         let _ = ctx;
+        domain::to_result(&AddCharacterAgeOutput { age_id: id })
+    }
+
+    fn supports_in_tx(&self) -> bool {
+        true
+    }
+
+    fn execute_in_tx(
+        &self,
+        _ctx: &ToolContext,
+        tx: &rusqlite::Transaction<'_>,
+        args: Value,
+    ) -> Result<ToolResult, ToolError> {
+        let parsed: AddCharacterAgeArgs = domain::parse_args("add_character_age", args)?;
+        let id = uuid::Uuid::now_v7().to_string();
+        let now = sagaline_store::time_util::now_iso();
+        tx.execute(
+            "INSERT INTO character_ages (id, character_id, age, note, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![id, parsed.character_id, parsed.age, parsed.note, now],
+        )
+        .map_err(|e| domain::map_store_err("add_character_age", e))?;
         domain::to_result(&AddCharacterAgeOutput { age_id: id })
     }
 }
@@ -308,6 +380,36 @@ impl Tool for AddCharacterAppearanceTool {
         )
         .map_err(|e| domain::map_store_err("add_character_appearance", e))?;
         let _ = ctx;
+        domain::to_result(&AddCharacterAppearanceOutput { appearance_id: id })
+    }
+
+    fn supports_in_tx(&self) -> bool {
+        true
+    }
+
+    fn execute_in_tx(
+        &self,
+        _ctx: &ToolContext,
+        tx: &rusqlite::Transaction<'_>,
+        args: Value,
+    ) -> Result<ToolResult, ToolError> {
+        let parsed: AddCharacterAppearanceArgs =
+            domain::parse_args("add_character_appearance", args)?;
+        let id = uuid::Uuid::now_v7().to_string();
+        let now = sagaline_store::time_util::now_iso();
+        tx.execute(
+            "INSERT INTO character_appearances \
+                (id, character_id, label, description, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                id,
+                parsed.character_id,
+                parsed.label,
+                parsed.description,
+                now
+            ],
+        )
+        .map_err(|e| domain::map_store_err("add_character_appearance", e))?;
         domain::to_result(&AddCharacterAppearanceOutput { appearance_id: id })
     }
 }

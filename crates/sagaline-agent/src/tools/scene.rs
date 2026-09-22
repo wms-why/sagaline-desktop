@@ -243,6 +243,39 @@ impl Tool for AssignCharacterToSceneTool {
             character_id: parsed.character_id,
         })
     }
+
+    fn supports_in_tx(&self) -> bool {
+        true
+    }
+
+    fn execute_in_tx(
+        &self,
+        _ctx: &ToolContext,
+        tx: &rusqlite::Transaction<'_>,
+        args: Value,
+    ) -> Result<ToolResult, ToolError> {
+        let parsed: AssignCharacterToSceneArgs =
+            domain::parse_args("assign_character_to_scene", args)?;
+        tx.execute(
+            "INSERT INTO scene_characters \
+                (scene_id, character_id, character_age_id, appearance_id) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(scene_id, character_id) DO UPDATE SET \
+                 character_age_id = excluded.character_age_id, \
+                 appearance_id     = excluded.appearance_id",
+            rusqlite::params![
+                parsed.scene_id,
+                parsed.character_id,
+                parsed.character_age_id,
+                parsed.appearance_id,
+            ],
+        )
+        .map_err(|e| domain::map_store_err("assign_character_to_scene", e))?;
+        domain::to_result(&AssignCharacterToSceneOutput {
+            scene_id: parsed.scene_id,
+            character_id: parsed.character_id,
+        })
+    }
 }
 
 // ---- assign_environment_to_scene ----------------------------------------
@@ -296,6 +329,31 @@ impl Tool for AssignEnvironmentToSceneTool {
         )
         .map_err(|e| domain::map_store_err("assign_environment_to_scene", e))?;
         let _ = ctx;
+        domain::to_result(&AssignEnvironmentToSceneOutput {
+            scene_id: parsed.scene_id,
+            environment_id: parsed.environment_id,
+        })
+    }
+
+    fn supports_in_tx(&self) -> bool {
+        true
+    }
+
+    fn execute_in_tx(
+        &self,
+        _ctx: &ToolContext,
+        tx: &rusqlite::Transaction<'_>,
+        args: Value,
+    ) -> Result<ToolResult, ToolError> {
+        let parsed: AssignEnvironmentToSceneArgs =
+            domain::parse_args("assign_environment_to_scene", args)?;
+        tx.execute(
+            "INSERT INTO scene_environments (scene_id, environment_id) \
+             VALUES (?1, ?2) \
+             ON CONFLICT(scene_id, environment_id) DO NOTHING",
+            rusqlite::params![parsed.scene_id, parsed.environment_id],
+        )
+        .map_err(|e| domain::map_store_err("assign_environment_to_scene", e))?;
         domain::to_result(&AssignEnvironmentToSceneOutput {
             scene_id: parsed.scene_id,
             environment_id: parsed.environment_id,

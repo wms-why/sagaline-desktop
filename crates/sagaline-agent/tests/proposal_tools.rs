@@ -12,8 +12,8 @@
 use std::sync::Arc;
 
 use sagaline_agent::tools::{
-    ApproveProposalTool, CreateChapterTool, CreateCharacterTool, ListPendingProposalsTool,
-    ProposeChangeTool, RejectProposalTool,
+    AddCharacterAgeTool, ApproveProposalTool, CreateChapterTool, CreateCharacterTool,
+    CreateShotTool, ListPendingProposalsTool, ProposeChangeTool, RejectProposalTool,
 };
 use sagaline_agent::{Capability, Tool, ToolContext, ToolRegistry};
 use sagaline_store::repo::NewStory;
@@ -564,4 +564,184 @@ async fn approve_atomic_commits_all_on_success() {
         .collect();
     replay_slugs.sort();
     assert_eq!(replay_slugs, vec!["alpha", "beta", "gamma"]);
+}
+
+// ---- Phase 5 follow-up: the remaining Mutate tools opt into execute_in_tx.
+//
+// `update_character`, `add_character_age`, `add_character_appearance`,
+// `assign_character_to_scene`, `assign_environment_to_scene`, and `create_shot`
+// each declared `supports_in_tx() = true` this phase. The tests below
+// prove the in-tx path is actually wired up: approve_proposal routes
+// them through `execute_in_tx` (so they participate in the single-
+// transaction wrapper), and a mid-batch failure still rolls the
+// batch back to the pre-approve world state.
+
+#[tokio::test]
+async fn approve_age_tool_rolls_back_on_duplicate_age() {
+    // Three `add_character_age` actions for the same character;
+    // actions #1 and #2 share `age = 10`. The UNIQUE(character_id,
+    // age) constraint fires mid-batch. Phase 5 must roll action #1
+    // back, leave zero character_ages rows, and keep the proposal
+    // `pending`.
+    let (world, ctx, mut reg) = fresh_registry();
+    register_domain_tools(&mut reg, world.clone());
+    reg.register(AddCharacterAgeTool::new(world.clone()));
+
+    let story = world
+        .stories()
+        .create(NewStory {
+            slug: "s",
+            title: "Story",
+            summary: "",
+        })
+        .unwrap();
+    let character = world
+        .characters()
+        .create(sagaline_store::repo::NewCharacter {
+            story_id: &story.id,
+            slug: "lin",
+            name: "Lin",
+            occupation: None,
+            bio: "",
+        })
+        .unwrap();
+
+    let propose = ProposeChangeTool::new(world.clone());
+    let out = run(
+        &propose,
+        ctx.clone(),
+        json!({
+            "story_id": story.id,
+            "summary": "age duplicate test",
+            "actions": [
+                { "tool_name": "add_character_age", "args": {
+                    "character_id": character.id, "age": 10, "note": "ten" } },
+                { "tool_name": "add_character_age", "args": {
+                    "character_id": character.id, "age": 10, "note": "ten-again" } },
+                { "tool_name": "add_character_age", "args": {
+                    "character_id": character.id, "age": 20, "note": "twenty" } }
+            ]
+        }),
+    )
+    .await;
+    let proposal_id = out["proposal_id"].as_str().unwrap().to_string();
+
+    let approve = ApproveProposalTool::new(world.clone()).with_registry(Arc::new(reg));
+    let err = approve
+        .execute(ctx.clone(), json!({"proposal_id": proposal_id}))
+        .await
+        .expect_err("expected approve to fail on duplicate age");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("add_character_age") && msg.contains("failed"),
+        "expected in-batch failure message, got: {msg}"
+    );
+
+    // World DB: zero character_ages rows. Action #1 (age=10) rolled
+    // back; action #3 (age=20) never landed either.
+    let conn = world.conn().unwrap();
+    let n_ages: i64 = conn
+        .query_row("SELECT COUNT(*) FROM character_ages", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n_ages, 0, "duplicate-age rollback must leave 0 ages");
+
+    // Proposal stays pending.
+    let p = world.proposals().get(&proposal_id).unwrap().unwrap();
+    assert_eq!(p.status, ProposalStatus::Pending);
+
+    // Audit log: only the propose row survived.
+    let rows = world.agent_actions().list_by_story(&story.id).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].tool_name, "propose_change");
+}
+
+#[tokio::test]
+async fn approve_shot_tool_commits_via_execute_in_tx() {
+    // Three valid `create_shot` actions under a fresh scene. None
+    // fail, so the in-tx path must commit all three replay rows +
+    // the approve-call audit row in a single transaction. This
+    // proves `create_shot`'s `execute_in_tx` is actually wired up.
+    let (world, ctx, mut reg) = fresh_registry();
+    register_domain_tools(&mut reg, world.clone());
+    reg.register(CreateShotTool::new(world.clone()));
+
+    let story = world
+        .stories()
+        .create(NewStory {
+            slug: "s",
+            title: "Story",
+            summary: "",
+        })
+        .unwrap();
+    let chapter = world
+        .scenes()
+        .create_chapter(sagaline_store::repo::NewChapter {
+            story_id: &story.id,
+            slug: "ch1",
+            ordinal: 1,
+            title: "Chapter 1",
+            synopsis: "",
+        })
+        .unwrap();
+    let scene = world
+        .scenes()
+        .create_scene(sagaline_store::repo::NewScene {
+            chapter_id: &chapter.id,
+            slug: "sc1",
+            ordinal: 1,
+            title: "Scene 1",
+            synopsis: "",
+        })
+        .unwrap();
+
+    let propose = ProposeChangeTool::new(world.clone());
+    let out = run(
+        &propose,
+        ctx.clone(),
+        json!({
+            "story_id": story.id,
+            "summary": "three shots",
+            "actions": [
+                { "tool_name": "create_shot", "args": {
+                    "scene_id": scene.id, "slug": "s1", "ordinal": 1,
+                    "title": "Shot 1", "prompt": "" } },
+                { "tool_name": "create_shot", "args": {
+                    "scene_id": scene.id, "slug": "s2", "ordinal": 2,
+                    "title": "Shot 2", "prompt": "" } },
+                { "tool_name": "create_shot", "args": {
+                    "scene_id": scene.id, "slug": "s3", "ordinal": 3,
+                    "title": "Shot 3", "prompt": "" } }
+            ]
+        }),
+    )
+    .await;
+    let proposal_id = out["proposal_id"].as_str().unwrap().to_string();
+
+    let approve = ApproveProposalTool::new(world.clone()).with_registry(Arc::new(reg));
+    let approve_out = approve
+        .execute(ctx.clone(), json!({"proposal_id": proposal_id}))
+        .await
+        .expect("approve should commit all 3 shots");
+    assert_eq!(approve_out["actions_replayed"], 3);
+    assert_eq!(approve_out["audit_rows"], 4);
+
+    let conn = world.conn().unwrap();
+    let n_shots: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM shots WHERE scene_id = ?1",
+            rusqlite::params![scene.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n_shots, 3, "all 3 shots must land in the world DB");
+
+    // Audit log: 1 propose + 3 replay + 1 approve-call = 5 rows.
+    let rows = world.agent_actions().list_by_story(&story.id).unwrap();
+    assert_eq!(rows.len(), 5);
+    let replay_names: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.tool_name == "create_shot")
+        .map(|r| r.tool_name.as_str())
+        .collect();
+    assert_eq!(replay_names.len(), 3);
 }
