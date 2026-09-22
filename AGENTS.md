@@ -47,7 +47,7 @@ client/                              Rust workspace (resolver = "2")
     │   └── src/                       ModelAdapter, ImageGen, openai_compat chat
     └── sagaline/                     the desktop binary
         ├── Cargo.toml                 name = "sagaline"
-        └── src/{main.rs,env.rs,sink.rs}  AppEnv + run_agent + gpui main
+        └── src/{main.rs,env.rs}        AppEnv + run_agent + gpui main
 ```
 
 The `crates/` layout is the seam where deferred work goes — add
@@ -447,11 +447,10 @@ smoke is:
   `AppEnv::build_agent` wires `RigLlm` automatically whenever a chat
   provider + key are configured in `~/.sageline/data/`. Without that
   pair the loop runs the deterministic scaffold (used by tests and
-  headless runs). `crates/sagaline-providers/` has a native `minimax`
-  image backend but no OpenAI `gpt-image-1` adapter yet; an OpenAI
-  image entry in `config.toml` is silently rejected at
-  `registry.pick_image("openai")`. Adding the adapter is a
-  single-trait impl.
+  headless runs). `crates/sagaline-providers/` ships two image
+  backends: a native `minimax` adapter and the OpenAI
+  `gpt-image-1` adapter registered under the `openai` key, so
+  `registry.pick_image("openai")` now routes correctly.
 - `sagaline_agent::tools::generate_image` already patches the parent
   shot's front matter with `assets.keyframe` (path relative to the
   enclosing story root) and `status: succeeded` when `shot_path` is
@@ -487,14 +486,6 @@ smoke is:
   makes the boot idempotent.
 - `Cargo.lock` is gitignored (intentional for a binary; keep it
   that way).
-- `crates/sagaline/src/sink.rs` is dead code — the
-  `ChannelSink` it defined was the old GPUI-side drain for
-  `Agent::run`. After `Agent::run_stream` + `bridge.forward_stream`
-  landed, events go through `cx.spawn` reading from an mpsc
-  receiver directly, and `ChannelSink` no longer has a caller.
-  The file is intentionally left in place (per the "don't fix
-  unrelated cleanup" rule) but should be deleted in a dedicated
-  pass once we know nothing else still references it.
 
 
 ## Deferred (next turns)
@@ -674,30 +665,14 @@ Phase 2.5 ships:
 
 ### Smaller items
 
-1. **OpenAI `gpt-image-1` adapter** — the `ProviderRegistry` is
-   already prepared for an image backend under the `openai`
-   name; an `OpenAiImage` impl of [`ImageGen`] closes the gap so
-   `pick_image("openai")` works.
-2. **BYOK key-entry UI** — a panel under the activity tab to
-   list `ProviderKeyId`s, add new keys (paste a plaintext once
-   → encrypted via the existing `SagalineStore::keys().put`),
-   delete. Once a chat key is present, `AppEnv::build_agent`
-   automatically attaches `RigLlm` and the loop leaves canned
-   mode.
-3. **Tts + ImageToVideo backends** — `Tts` and `ImageToVideo`
+1. **Tts + ImageToVideo backends** — `Tts` and `ImageToVideo`
    traits are defined but no provider has implemented them yet.
    The registry can route calls as soon as one does.
-4. **Hosted project sync** — when `../homeweb/` ships the
+2. **Hosted project sync** — when `../homeweb/` ships the
    project-sync endpoint, add an opt-in client. This is the
    only piece of this project that talks to `homeweb/`, and it
    must stay opt-in (the open source pipeline must work without
    it).
-5. **Default project location on first run** — today the new-
-   story dialog is disabled until the user picks a location
-   in Project Settings (⌘ ,). The "one-click use a sensible
-   default" flow (e.g. `$HOME/Documents/Sagaline Projects`,
-   created if absent) is a follow-up if the user wants the
-   friction removed.
 
 ## External dependencies — approval gate
 
