@@ -12,11 +12,9 @@
 pub mod env;
 pub mod prefs;
 pub mod service;
-pub mod sink;
 
 pub use env::{AppEnv, EnvError};
 pub use service::AppEnvStoryService;
-pub use sink::ChannelSink;
 pub type AppEnvSlot = sagaline_ui::EnvSlot<AppEnv>;
 
 use std::sync::Arc;

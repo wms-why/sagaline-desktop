@@ -761,20 +761,16 @@ Approved external deps (populated as the user grants each one):
 - `age` v0.11 with features = `["std", "armor"]` — X25519-based
   encryption of stored keys. Approved 2026-09-16. Provides the
   recipient/identity abstraction.
-- `redb` v2 — pure-Rust embedded KV store for the key DB.
-  Approved 2026-09-16. Final pick over `sled` (which has entered
-  maintenance mode).
 
 - `mp4` crate v0.x — pure-Rust mp4 muxer for `compose_video`. Approved
   2026-09-16. Concrete version pinned when the tool lands.
-- (superseded 2026-09-18) Job store used to reuse `redb` from
-  the existing `sagaline-keys` key store. As of this phase,
-  both `provider_key` and `jobs` live in SQLite via the V008
-  migration, and the `sagaline-keys` crate has been deleted
-  from the workspace. `redb` itself is no longer a direct
-  dependency of any workspace member; it may be removed from
-  `[workspace.dependencies]` once a follow-up audit confirms no
-  transitive user.
+- (superseded 2026-09-18; resolved 2026-09-22) Job store used
+  to reuse `redb` from the existing `sagaline-keys` key store.
+  Both `provider_key` and `jobs` now live in SQLite via the V008
+  migration, and the `sagaline-keys` crate has been deleted from
+  the workspace. Follow-up audit 2026-09-22 confirmed no `.rs`
+  file imports `redb::*`; the workspace dep entry was removed
+  from `client/Cargo.toml` on this turn.
 - `rig-core` v0.42.0 — opinionated LLM SDK (model providers +
   tool surface). MIT licensed; compatible with our Apache-2.0.
   Approved 2026-09-16. We use only the model + tool surface; the

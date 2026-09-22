@@ -61,9 +61,10 @@ impl TokioBridge {
     ///
     /// The body's `Future` runs entirely in the Tokio world — it
     /// does NOT receive a `&mut AsyncApp`. To update gpui state
-    /// from inside, drain results via a channel (see
-    /// `ChannelSink`) or wrap the body in another `cx.spawn` after
-    /// awaiting this task.
+    /// from inside, drain results via a `tokio::sync::mpsc`
+    /// channel and a separate `cx.spawn` task on the GPUI side,
+    /// or wrap the body in another `cx.spawn` after awaiting
+    /// this task.
     pub fn spawn<F, T>(&self, fut: F) -> Task<Result<T, JoinError>>
     where
         F: Future<Output = T> + Send + 'static,
