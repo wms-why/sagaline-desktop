@@ -143,7 +143,7 @@ impl AppEnv {
             }
             Err(e) => return Err(e.into()),
         };
-        let registry = Arc::new(ProviderRegistry::new());
+        let registry = Arc::new(register_providers_from_config(&config, &store));
         let prefs = load_or_adopt_default_prefs(&data_dir, home.as_deref())?;
         let story_store = build_story_store(prefs.project_location.clone());
         // The agent's tool calls go through this runtime; multi-thread
@@ -402,6 +402,118 @@ fn build_story_store(loc: Option<ProjectLocation>) -> Option<Arc<dyn StoryStore>
     loc.map(|l| Arc::new(FileStoryStore::new(l)) as Arc<dyn StoryStore>)
 }
 
+/// Populate a fresh [`ProviderRegistry`] from the user's
+/// `config.toml` + key store. Walks every
+/// `[(chat|image|tts|image_to_video).<provider>]` section; for each
+/// one, looks up the matching `provider_key` row in the world DB
+/// (id format `provider/default`) and constructs the corresponding
+/// backend.
+///
+/// What gets registered:
+/// - `[chat.*]` — chat is handled by [`sagaline_providers::openai_compat`]
+///   (rig's `CompletionModel` isn't dyn-compatible), so chat rows
+///   are intentionally NOT added to the registry. Chat selection
+///   happens at `Agent::build_llm` time by iterating the same
+///   config in priority order.
+/// - `[image.*]` — `minimax` → `MinimaxImage`, `openai` → `OpenAiImage`.
+///   Unknown providers log a `warn!` and are skipped.
+/// - `[tts.*]` — `minimax` → `MinimaxTts`. Unknown providers warn + skip.
+/// - `[image_to_video.*]` — `minimax` → `MinimaxVideo`. Unknown providers
+///   warn + skip.
+///
+/// A provider that's in `config.toml` but has no key row is
+/// silently skipped (the user simply hasn't added a key yet;
+/// the BYOK panel surfaces this). Provider present in the key
+/// store but absent from `config.toml` is also skipped — config
+/// is the source of truth for which providers to *expose*.
+///
+/// The selection is **config-driven**: no env var decides which
+/// provider to start. Re-running [`AppEnv::open`] after editing
+/// `config.toml` or adding a key rebuilds the registry from the
+/// new state.
+fn register_providers_from_config(
+    config: &ProviderConfigSet,
+    store: &sagaline_store::World,
+) -> ProviderRegistry {
+    use sagaline_providers::{
+        Capability, MinimaxImage, MinimaxTts, MinimaxVideo, OpenAiImage,
+    };
+    use sagaline_store::ProviderKeyId;
+    use secrecy::SecretString;
+
+    let mut registry = ProviderRegistry::new();
+    let secret_for = |provider: &str, key_id: &str| -> Option<SecretString> {
+        use secrecy::ExposeSecret as _;
+        let id = ProviderKeyId::new(provider, key_id)
+            .map_err(|e| warn!(error = %e, provider, "invalid provider key id; skipping"))
+            .ok()?;
+        let handle = store
+            .keys()
+            .get(&id)
+            .map_err(|e| warn!(error = %e, provider, "no key in store; skipping"))
+            .ok()?;
+        let plaintext = handle.reveal().expose_secret().to_string();
+        Some(SecretString::new(plaintext.into_boxed_str()))
+    };
+
+    for provider in config.providers(Capability::Image) {
+        let Some(cfg) = config.get(Capability::Image, &provider) else {
+            continue;
+        };
+        let Some(api_key) = secret_for(&provider, "default") else {
+            continue;
+        };
+        match provider.as_str() {
+            "minimax" => registry
+                .register_image(MinimaxImage::new(api_key, cfg.base_url.clone(), cfg.model.clone())),
+            "openai" => registry
+                .register_image(OpenAiImage::new(api_key, cfg.base_url.clone(), cfg.model.clone())),
+            other => warn!(provider = %other, "unknown image provider in config.toml; skipping"),
+        }
+    }
+
+    for provider in config.providers(Capability::Tts) {
+        let Some(cfg) = config.get(Capability::Tts, &provider) else {
+            continue;
+        };
+        let Some(api_key) = secret_for(&provider, "default") else {
+            continue;
+        };
+        match provider.as_str() {
+            "minimax" => registry
+                .register_tts(MinimaxTts::new(api_key, cfg.base_url.clone(), cfg.model.clone())),
+            other => warn!(provider = %other, "unknown tts provider in config.toml; skipping"),
+        }
+    }
+
+    for provider in config.providers(Capability::ImageToVideo) {
+        let Some(cfg) = config.get(Capability::ImageToVideo, &provider) else {
+            continue;
+        };
+        let Some(api_key) = secret_for(&provider, "default") else {
+            continue;
+        };
+        match provider.as_str() {
+            "minimax" => registry.register_image_to_video(MinimaxVideo::new(
+                api_key,
+                cfg.base_url.clone(),
+                cfg.model.clone(),
+            )),
+            other => warn!(provider = %other, "unknown image_to_video provider in config.toml; skipping"),
+        }
+    }
+
+    if !registry.is_empty() {
+        tracing::info!(
+            image = ?registry.providers_for(Capability::Image),
+            tts = ?registry.providers_for(Capability::Tts),
+            image_to_video = ?registry.providers_for(Capability::ImageToVideo),
+            "ProviderRegistry populated from config + key store"
+        );
+    }
+    registry
+}
+
 impl std::fmt::Debug for AppEnv {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppEnv")
@@ -486,4 +598,143 @@ fn load_or_adopt_default_prefs(
         }
     }
     Ok(prefs)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for [`register_providers_from_config`]. Use an
+    //! in-memory [`sagaline_store::World`] (which sidesteps the
+    //! data-dir bootstrap) and an in-line [`ProviderConfigSet`] so
+    //! the test never touches the filesystem.
+
+    use super::register_providers_from_config;
+    use sagaline_providers::{Capability, ProviderConfigSet};
+    use sagaline_store::{ProviderKeyId, World};
+    use secrecy::SecretString;
+
+    fn seed_key(store: &World, provider: &str, key_id: &str, plaintext: &str) {
+        let id = ProviderKeyId::new(provider, key_id).expect("valid id");
+        let secret = SecretString::new(Box::from(plaintext.to_string().into_boxed_str()));
+        store.keys().put(&id, &secret).expect("put key");
+    }
+
+    /// Parse a `config.toml` fragment into a [`ProviderConfigSet`]
+    /// by writing it to a temp file and calling the public
+    /// [`ProviderConfigSet::load`] entry point. The unit tests in
+    /// `sagaline-providers` do this via the internal `RawConfig`
+    /// type; we don't have that visibility here, so the public
+    /// loader is the cleanest option.
+    fn parse_config(toml: &str) -> ProviderConfigSet {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, toml).expect("write config");
+        ProviderConfigSet::load(&path).expect("load config")
+    }
+
+    #[test]
+    fn registers_all_capabilities_for_seeded_providers() {
+        let world = World::in_memory().expect("in-memory world");
+        seed_key(&world, "minimax", "default", "sk-minimax-fake");
+        seed_key(&world, "openai", "default", "sk-openai-fake");
+
+        let toml = r#"
+[image.minimax]
+base_url = "https://api.minimax.chat/v1"
+model    = "image-01"
+
+[image.openai]
+base_url = "https://api.openai.com/v1"
+model    = "gpt-image-1"
+
+[tts.minimax]
+base_url = "https://api.minimax.chat/v1"
+model    = "speech-2.8-hd"
+
+[image_to_video.minimax]
+base_url = "https://api.minimax.chat/v1"
+model    = "video-01"
+"#;
+        let config = parse_config(toml);
+        let registry = register_providers_from_config(&config, &world);
+
+        // All three capabilities resolve through the registry.
+        assert!(registry.pick_image("minimax").is_ok(), "minimax image");
+        assert!(registry.pick_image("openai").is_ok(), "openai image");
+        assert!(registry.pick_tts("minimax").is_ok(), "minimax tts");
+        assert!(
+            registry.pick_image_to_video("minimax").is_ok(),
+            "minimax image-to-video"
+        );
+
+        // Sanity: capability-scoped lookups don't cross-contaminate.
+        assert!(registry.pick_tts("openai").is_err());
+        assert!(registry.pick_image_to_video("openai").is_err());
+
+        // `providers_for` should list each name under the right
+        // capability bucket (openai under Image only, minimax under
+        // all three).
+        assert_eq!(registry.providers_for(Capability::Image), vec!["minimax", "openai"]);
+        assert_eq!(registry.providers_for(Capability::Tts), vec!["minimax"]);
+        assert_eq!(registry.providers_for(Capability::ImageToVideo), vec!["minimax"]);
+    }
+
+    #[test]
+    fn skips_providers_without_keys() {
+        let world = World::in_memory().expect("in-memory world");
+        // Only seed a tts key — image and video must be skipped.
+        seed_key(&world, "minimax", "default", "sk-minimax-fake");
+
+        let toml = r#"
+[image.minimax]
+base_url = "https://api.minimax.chat/v1"
+model    = "image-01"
+
+[tts.minimax]
+base_url = "https://api.minimax.chat/v1"
+model    = "speech-2.8-hd"
+"#;
+        let config = parse_config(toml);
+        let registry = register_providers_from_config(&config, &world);
+
+        // Tts is registered because the key is present.
+        assert!(registry.pick_tts("minimax").is_ok());
+        // Image is NOT registered because the key is missing — the
+        // registry is config-driven AND key-driven; neither alone
+        // is enough.
+        assert!(registry.pick_image("minimax").is_err());
+    }
+
+    #[test]
+    fn empty_config_yields_empty_registry() {
+        // Regression guard for the old "ProviderRegistry starts
+        // empty" behaviour: a fresh install with no config.toml
+        // produces a usable-but-empty registry, not a panic.
+        let world = World::in_memory().expect("in-memory world");
+        let config = ProviderConfigSet::default();
+        let registry = register_providers_from_config(&config, &world);
+        assert!(registry.is_empty());
+        assert!(registry.providers().is_empty());
+    }
+
+    #[test]
+    fn warns_and_skips_unknown_provider_name() {
+        // An unknown provider name in config.toml must not crash;
+        // it must log a warn and produce no registration. We can't
+        // observe the warn from this scope, so the assertion is
+        // "registry stays empty for that capability".
+        let world = World::in_memory().expect("in-memory world");
+        seed_key(&world, "mystery", "default", "sk-mystery");
+
+        let toml = r#"
+[image.mystery]
+base_url = "https://example.invalid/v1"
+model    = "mystery-v1"
+"#;
+        let config = parse_config(toml);
+        let registry = register_providers_from_config(&config, &world);
+        assert!(
+            registry.pick_image("mystery").is_err(),
+            "unknown provider name must NOT be registered"
+        );
+    }
 }

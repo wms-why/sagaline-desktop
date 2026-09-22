@@ -54,6 +54,7 @@ pub use error::ProviderError;
 pub use image_gen::ImageGen;
 pub use image_to_video::{ImageToVideo, TaskHandle, VideoRequest, VideoStatus};
 pub use minimax::{MinimaxImage, MinimaxTts, MinimaxVideo};
+pub use openai::OpenAiImage;
 pub use openai_compat::{build_chat, build_chat_with_default, BuildError, ChatModel};
 pub use registry::{ProviderRegistry, ResolvedProvider};
 pub use tts::Tts;

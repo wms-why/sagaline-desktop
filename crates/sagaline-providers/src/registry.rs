@@ -197,6 +197,20 @@ impl ProviderRegistry {
         names
     }
 
+    /// Provider names registered with a given capability (sorted).
+    /// A backend advertising `[Capability::Image, Capability::Tts]`
+    /// appears under both queries.
+    pub fn providers_for(&self, capability: Capability) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.capabilities.contains(&capability))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

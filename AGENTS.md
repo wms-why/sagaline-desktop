@@ -154,12 +154,14 @@ The seven crates line up with the agent's anatomy (see
  — route through the bridge.**
 - `crates/sagaline-providers/` — model-adapter traits
  ([`ModelAdapter`], [`ImageGen`], [`Tts`], [`ImageToVideo`]) and
- provider backends. Native `minimax` image backend; rig-core
- OpenAI-compatible chat factory in
- `openai_compat::build_chat` (covers OpenAI, DeepSeek, Ollama,
- MiniMax chat, Tongyi). `ProviderConfigSet` parses
- `~/.sageline/data/config.toml`. `ProviderRegistry` is the
- capability-keyed dispatch.
+ provider backends. Native `minimax` image / tts / image-to-video
+ backends; native `openai` image backend (gpt-image-1); rig-core
+ OpenAI-compatible chat factory in `openai_compat::build_chat`
+ (covers OpenAI, DeepSeek, Ollama, MiniMax chat, Tongyi).
+ `ProviderConfigSet` parses `~/.sageline/data/config.toml`.
+ `ProviderRegistry` is the capability-keyed dispatch; the app
+ shell populates it at startup from config + key store (no env
+ var picks the provider).
 - `crates/sagaline/` keeps the binary thin — `main.rs` boots
  gpui, builds `AppEnv` (an `Arc<SagalineStore>` +
  `ProviderConfigSet` + `ProviderRegistry` + `Prefs` +
@@ -453,9 +455,15 @@ smoke is:
   under the `openai` key, a native `MinimaxTts` adapter, and a
   native `MinimaxVideo` (image-to-video) adapter. The registry
   exposes typed `pick_image`, `pick_tts`, `pick_image_to_video`
-  accessors; routing from `config.toml` + key store to a
-  pre-registered backend is the app-shell's responsibility
-  (Phase-5 follow-up).
+  accessors. `AppEnv::open_with` calls
+  `register_providers_from_config(config, store)` to populate the
+  registry from `config.toml` + the world-DB key store — config
+  is the source of truth for which providers to *expose*, a
+  matching `provider_key` row is required to actually register,
+  and unknown provider names log a warn and are skipped. Chat
+  backends are not added (rig's `CompletionModel` isn't
+  dyn-compatible); they keep going through the openai_compat
+  factory at `Agent::build_llm` time.
 - `sagaline_agent::tools::generate_image` already patches the parent
   shot's front matter with `assets.keyframe` (path relative to the
   enclosing story root) and `status: succeeded` when `shot_path` is
