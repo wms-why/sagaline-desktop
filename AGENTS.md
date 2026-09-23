@@ -449,21 +449,36 @@ smoke is:
   `AppEnv::build_agent` wires `RigLlm` automatically whenever a chat
   provider + key are configured in `~/.sageline/data/`. Without that
   pair the loop runs the deterministic scaffold (used by tests and
-  headless runs). `crates/sagaline-providers/` ships three
-  capability surfaces through minimax: a native `minimax`
-  image adapter and the OpenAI `gpt-image-1` adapter registered
-  under the `openai` key, a native `MinimaxTts` adapter, and a
-  native `MinimaxVideo` (image-to-video) adapter. The registry
+  headless runs). `crates/sagaline-providers/` ships four capability
+  surfaces: a native `MinimaxImage` adapter + an OpenAI `gpt-image-1`
+  adapter (both `Capability::Image`), a native `MinimaxTts` adapter
+  (`Capability::Tts`), and a native `MinimaxVideo` adapter
+  (`Capability::ImageToVideo`, async submit + poll). The registry
   exposes typed `pick_image`, `pick_tts`, `pick_image_to_video`
-  accessors. `AppEnv::open_with` calls
+  accessors, plus `providers_for(capability)` for per-capability
+  listing. `AppEnv::open_with` calls
   `register_providers_from_config(config, store)` to populate the
   registry from `config.toml` + the world-DB key store — config
   is the source of truth for which providers to *expose*, a
   matching `provider_key` row is required to actually register,
-  and unknown provider names log a warn and are skipped. Chat
-  backends are not added (rig's `CompletionModel` isn't
-  dyn-compatible); they keep going through the openai_compat
+  and unknown provider names log a warn and are skipped. A single
+  `provider/default` key unlocks every capability for that
+  provider. Chat backends are not added (rig's `CompletionModel`
+  isn't dyn-compatible); they keep going through the openai_compat
   factory at `Agent::build_llm` time.
+- `crates/sagaline-agent/src/tools/` ships four `Execute`-tier tools
+  wrapping the providers registry, all registered by
+  `AppEnv::build_agent`: `generate_image` (MinimaxImage / OpenAiImage),
+  `generate_speech` (MinimaxTts), `submit_video` + `poll_video` (the
+  MinimaxVideo async submit / poll pair), and `compose_video` (mp4
+  re-mux with no re-encoding; first input's codec config is reused
+  for the output). `compose_video` runs inside `spawn_blocking`
+  because the `mp4` crate's reader/writer hold `!Send` handles.
+  All four share the `(registry, config, store)` triplet passed
+  in by `AppEnv::build_agent`. Smoke tests live in
+  `crates/sagaline-agent/tests/execute_tools_smoke.rs`; wiremock
+  tests for the wire layer live in the providers crate
+  (`tests/minimax_tts.rs`, `tests/minimax_video.rs`).
 - `sagaline_agent::tools::generate_image` already patches the parent
   shot's front matter with `assets.keyframe` (path relative to the
   enclosing story root) and `status: succeeded` when `shot_path` is
@@ -803,6 +818,24 @@ Approved 2026-09-22 (this turn):
   `<data_dir>/sagaline.log` (ANSI off) for post-mortem. Both
   gated by `RUST_LOG`; default level `warn`. `try_init()` keeps
   the boot idempotent.
+
+Approved 2026-09-23 (this turn):
+
+- `mp4` v0.14 — pure-Rust mp4 reader + writer used by the
+  `compose_video` agent tool
+  (`crates/sagaline-agent/src/tools/compose_video.rs`). MIT
+  licensed. Final pick over shelling out to `ffmpeg` (which is
+  an unapproved runtime dep — users don't have to install it).
+  Trade-off: re-mux only (no re-encoding), single video track,
+  video codecs limited to avc1 / hev1 / vp09. Audio passthrough
+  is a future phase. Pre-approval was already on file in the
+  "Approved external deps" section ("`mp4` crate v0.x — pure-Rust
+  mp4 muxer for `compose_video`. Approved 2026-09-16. Concrete
+  version pinned when the tool lands.") — this is that
+  pin: v0.14.0 (the latest release on 2026-09-22). No new
+  transitive surprises beyond `byteorder` + `bytes` + `num-rational` +
+  `serde` + `serde_json` + `thiserror`, all already in the
+  workspace family.
 
 On legacy `keys.db` (2026-09-18): the previous redb file at
 `~/.sageline/data/keys.db` is intentionally NOT migrated into

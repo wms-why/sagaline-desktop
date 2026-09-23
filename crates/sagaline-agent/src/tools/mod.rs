@@ -25,22 +25,29 @@
 
 pub mod chapter;
 pub mod character;
+pub mod compose_video;
 pub mod domain;
 pub mod environment;
 pub mod generate_image;
+pub mod generate_speech;
+pub mod poll_video;
 pub mod prop;
 pub mod proposal;
 pub mod scene;
 pub mod shot;
 pub mod story;
+pub mod submit_video;
 pub mod world_validate;
 
 pub use chapter::CreateChapterTool;
 pub use character::{
     AddCharacterAgeTool, AddCharacterAppearanceTool, CreateCharacterTool, UpdateCharacterTool,
 };
+pub use compose_video::{ComposeVideoArgs, ComposeVideoTool};
 pub use environment::CreateEnvironmentTool;
 pub use generate_image::{GenerateImageArgs, GenerateImageTool};
+pub use generate_speech::{GenerateSpeechArgs, GenerateSpeechTool};
+pub use poll_video::{PollVideoArgs, PollVideoTool, PollVideoStatusJson};
 pub use prop::CreatePropTool;
 pub use proposal::{
     ApproveProposalTool, ListPendingProposalsTool, ProposeChangeTool, RejectProposalTool,
@@ -49,4 +56,5 @@ pub use sagaline_store::ValidationIssue;
 pub use scene::{AssignCharacterToSceneTool, AssignEnvironmentToSceneTool, CreateSceneTool};
 pub use shot::CreateShotTool;
 pub use story::{GetStoryTool, ListStoriesTool, SearchStoryTool};
+pub use submit_video::{SubmitVideoArgs, SubmitVideoTool};
 pub use world_validate::ValidateWorldTool;

@@ -94,32 +94,72 @@ impl ProviderRegistry {
 
     /// Register a text-to-speech backend (also populates the
     /// generic entries map).
+    ///
+    /// If an entry for the same provider already exists (e.g.
+    /// registered through [`Self::register_image`]), this merges
+    /// the TTS capability into the existing `Entry` rather than
+    /// overwriting it — `providers_for(Capability::Image)` still
+    /// sees the provider after a TTS registration for the same
+    /// name, and vice versa. The adapter slot of the merged
+    /// entry is overwritten by the latest typed registration
+    /// (typed `pick_image` / `pick_tts` / `pick_image_to_video`
+    /// lookups bypass the generic adapter entirely, so this is
+    /// only observable through [`Self::pick`]).
     pub fn register_tts<A: ModelAdapter + Tts + 'static>(&mut self, backend: A) {
         let provider_name = backend.provider_name().to_string();
-        let capabilities = backend.capabilities().to_vec();
+        let new_caps = backend.capabilities().to_vec();
         let tts: Arc<dyn Tts> = Arc::new(backend);
-        let entry = Entry {
-            capabilities,
-            adapter: tts.clone(),
+        let merged = match self.entries.remove(&provider_name) {
+            Some(prev) => {
+                let mut caps = prev.capabilities;
+                for c in &new_caps {
+                    if !caps.contains(c) {
+                        caps.push(*c);
+                    }
+                }
+                Entry {
+                    capabilities: caps,
+                    adapter: tts.clone(),
+                }
+            }
+            None => Entry {
+                capabilities: new_caps,
+                adapter: tts.clone(),
+            },
         };
-        self.entries.insert(provider_name.clone(), entry);
+        self.entries.insert(provider_name.clone(), merged);
         self.tts_backends.insert(provider_name, tts);
     }
 
     /// Register an image-to-video backend (also populates the
-    /// generic entries map).
+    /// generic entries map). Same merge contract as
+    /// [`Self::register_tts`].
     pub fn register_image_to_video<A: ModelAdapter + ImageToVideo + 'static>(
         &mut self,
         backend: A,
     ) {
         let provider_name = backend.provider_name().to_string();
-        let capabilities = backend.capabilities().to_vec();
+        let new_caps = backend.capabilities().to_vec();
         let video: Arc<dyn ImageToVideo> = Arc::new(backend);
-        let entry = Entry {
-            capabilities,
-            adapter: video.clone(),
+        let merged = match self.entries.remove(&provider_name) {
+            Some(prev) => {
+                let mut caps = prev.capabilities;
+                for c in &new_caps {
+                    if !caps.contains(c) {
+                        caps.push(*c);
+                    }
+                }
+                Entry {
+                    capabilities: caps,
+                    adapter: video.clone(),
+                }
+            }
+            None => Entry {
+                capabilities: new_caps,
+                adapter: video.clone(),
+            },
         };
-        self.entries.insert(provider_name.clone(), entry);
+        self.entries.insert(provider_name.clone(), merged);
         self.video_backends.insert(provider_name, video);
     }
 

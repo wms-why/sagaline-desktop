@@ -240,10 +240,11 @@ impl AppEnv {
     pub fn build_agent(&self, _story_root: &Path) -> Arc<Agent> {
         use sagaline_agent::tools::{
             AddCharacterAgeTool, AddCharacterAppearanceTool, ApproveProposalTool,
-            AssignCharacterToSceneTool, AssignEnvironmentToSceneTool, CreateChapterTool,
-            CreateCharacterTool, CreateEnvironmentTool, CreatePropTool, CreateSceneTool,
-            CreateShotTool, GenerateImageTool, GetStoryTool, ListPendingProposalsTool,
-            ListStoriesTool, ProposeChangeTool, RejectProposalTool, SearchStoryTool,
+            AssignCharacterToSceneTool, AssignEnvironmentToSceneTool, ComposeVideoTool,
+            CreateChapterTool, CreateCharacterTool, CreateEnvironmentTool, CreatePropTool,
+            CreateSceneTool, CreateShotTool, GenerateImageTool, GenerateSpeechTool,
+            GetStoryTool, ListPendingProposalsTool, ListStoriesTool, PollVideoTool,
+            ProposeChangeTool, RejectProposalTool, SearchStoryTool, SubmitVideoTool,
             UpdateCharacterTool, ValidateWorldTool,
         };
         use sagaline_agent::AgentConfig;
@@ -312,6 +313,22 @@ impl AppEnv {
             self.config.clone(),
             self.store.clone(),
         ));
+        agent.tools_mut().register(GenerateSpeechTool::new(
+            self.registry.clone(),
+            self.config.clone(),
+            self.store.clone(),
+        ));
+        agent.tools_mut().register(SubmitVideoTool::new(
+            self.registry.clone(),
+            self.config.clone(),
+            self.store.clone(),
+        ));
+        agent.tools_mut().register(PollVideoTool::new(
+            self.registry.clone(),
+            self.config.clone(),
+            self.store.clone(),
+        ));
+        agent.tools_mut().register(ComposeVideoTool::new());
 
         if let Some(llm) = self.try_build_llm() {
             agent = agent.with_llm(llm);
@@ -680,28 +697,42 @@ model    = "video-01"
 
     #[test]
     fn skips_providers_without_keys() {
+        // Config-driven AND key-driven: a provider in config.toml
+        // with no matching `provider_key` row is silently skipped.
+        // We seed a minimax key but NOT an openai key, so the
+        // `[image.openai]` config entry must not register. (We
+        // can't use two `minimax/<cap>` entries here — a single
+        // `minimax/default` key row is shared across all
+        // capabilities of that provider, which is the expected
+        // user model: one API key, all the minimax backends it
+        // unlocks.)
         let world = World::in_memory().expect("in-memory world");
-        // Only seed a tts key — image and video must be skipped.
         seed_key(&world, "minimax", "default", "sk-minimax-fake");
+        // No seed_key for "openai".
 
         let toml = r#"
 [image.minimax]
 base_url = "https://api.minimax.chat/v1"
 model    = "image-01"
 
-[tts.minimax]
-base_url = "https://api.minimax.chat/v1"
-model    = "speech-2.8-hd"
+[image.openai]
+base_url = "https://api.openai.com/v1"
+model    = "gpt-image-1"
 "#;
         let config = parse_config(toml);
         let registry = register_providers_from_config(&config, &world);
 
-        // Tts is registered because the key is present.
-        assert!(registry.pick_tts("minimax").is_ok());
-        // Image is NOT registered because the key is missing — the
-        // registry is config-driven AND key-driven; neither alone
-        // is enough.
-        assert!(registry.pick_image("minimax").is_err());
+        // minimax has a key → registered.
+        assert!(registry.pick_image("minimax").is_ok());
+        // openai is in config but has no key → silently skipped.
+        assert!(
+            registry.pick_image("openai").is_err(),
+            "openai is in config.toml with no provider_key row → must skip"
+        );
+        // Unknown provider is *still* skipped even with a key
+        // (no native backend for it). Add a separate assertion
+        // for that case below; here we only cover the key
+        // dimension.
     }
 
     #[test]
