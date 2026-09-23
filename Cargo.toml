@@ -47,3 +47,4 @@ r2d2 = "0.8"
 r2d2_sqlite = "0.25"
 uuid = { version = "1", features = ["v7", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+mp4 = "0.14"

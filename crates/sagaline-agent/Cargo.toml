@@ -26,6 +26,7 @@ secrecy = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+mp4 = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }
